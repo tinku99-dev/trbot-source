@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import hmac
 import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from email.utils import formatdate
 from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
@@ -263,6 +268,7 @@ _STATE_RECONCILE_LOCAL_NEWER = os.environ.get("STATE_RECONCILE_LOCAL_NEWER", "fa
 _STATE_BACKUP_ENABLED = os.environ.get("STATE_BACKUP_ENABLED", "true").lower() != "false"
 _STATE_BACKUP_PREFIX = os.environ.get("STATE_BACKUP_PREFIX", "trader-state-backups")
 _STATE_BACKUP_MIN_INTERVAL_SECONDS = int(os.environ.get("STATE_BACKUP_MIN_INTERVAL_SECONDS", "900"))
+_BLOB_REST_TIMEOUT_SECONDS = int(os.environ.get("BLOB_REST_TIMEOUT_SECONDS", "15"))
 _STATE_BACKUP_FILES = {
     PORTFOLIO_FILE,
     HISTORY_FILE,
@@ -352,7 +358,73 @@ def _load_from_blob_with_metadata(filepath: str):
             return data, None
     except Exception as exc:
         print(f"[Blob] load failed for {os.path.basename(filepath)}: {exc}")
-        return None, None
+        return _load_from_blob_rest(filepath), None
+
+def _parse_blob_connection_string() -> dict[str, str]:
+    parts: dict[str, str] = {}
+    for item in _BLOB_CONN_STR.split(";"):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        parts[key] = value
+    return parts
+
+def _blob_rest_request(method: str, blob_name: str, body: bytes | None = None) -> bytes:
+    parts = _parse_blob_connection_string()
+    account = parts.get("AccountName", "")
+    account_key = parts.get("AccountKey", "")
+    endpoint_suffix = parts.get("EndpointSuffix", "core.windows.net")
+    if not account or not account_key:
+        raise RuntimeError("Storage connection string is missing AccountName or AccountKey.")
+
+    body = body or b""
+    encoded_blob_name = "/".join(urllib.parse.quote(part, safe="") for part in blob_name.split("/"))
+    url = f"https://{account}.blob.{endpoint_suffix}/{_BLOB_CONTAINER}/{encoded_blob_name}"
+    x_ms_date = formatdate(usegmt=True)
+    x_ms_version = "2023-11-03"
+    headers = {
+        "x-ms-date": x_ms_date,
+        "x-ms-version": x_ms_version,
+    }
+    content_length = ""
+    if method in {"PUT", "POST"}:
+        content_length = str(len(body))
+        headers["Content-Length"] = content_length
+    if method == "PUT":
+        headers["x-ms-blob-type"] = "BlockBlob"
+        headers["Content-Type"] = "application/json"
+
+    canonicalized_headers = "".join(
+        f"{key}:{headers[key]}\n"
+        for key in sorted(headers)
+        if key.lower().startswith("x-ms-")
+    )
+    canonicalized_resource = f"/{account}/{_BLOB_CONTAINER}/{blob_name}"
+    string_to_sign = (
+        f"{method}\n\n\n{content_length}\n\n"
+        f"{headers.get('Content-Type', '')}\n\n\n\n\n\n\n"
+        f"{canonicalized_headers}{canonicalized_resource}"
+    )
+    signature = base64.b64encode(
+        hmac.new(
+            base64.b64decode(account_key),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii")
+    headers["Authorization"] = f"SharedKey {account}:{signature}"
+
+    request = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=_BLOB_REST_TIMEOUT_SECONDS) as response:
+        return response.read()
+
+def _load_from_blob_rest(filepath: str):
+    try:
+        raw = _blob_rest_request("GET", _blob_name(filepath))
+        return json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        print(f"[Blob REST] load failed for {os.path.basename(filepath)}: {exc}")
+        return None
 
 def _backup_existing_blob(container, blob, filepath: str, new_payload: str) -> None:
     if not _STATE_BACKUP_ENABLED or os.path.basename(filepath) not in _STATE_BACKUP_FILES:
@@ -389,6 +461,14 @@ def _save_to_blob(filepath: str, data) -> None:
         blob.upload_blob(payload, overwrite=True)
     except Exception as exc:
         print(f"[Blob] save failed for {os.path.basename(filepath)}: {exc}")
+        _save_to_blob_rest(filepath, data)
+
+def _save_to_blob_rest(filepath: str, data) -> None:
+    try:
+        payload = json.dumps(data, indent=4).encode("utf-8")
+        _blob_rest_request("PUT", _blob_name(filepath), payload)
+    except Exception as exc:
+        print(f"[Blob REST] save failed for {os.path.basename(filepath)}: {exc}")
 
 
 def _data_path(filename: str) -> str:
