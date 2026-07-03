@@ -135,7 +135,14 @@ def get_coinbase_mark_price(product_id: str, fallback: float = 0.0) -> float:
         return float(fallback or 0.0)
 
 
-def build_manual_close_record(trader: Any, product_id: str, position: Dict[str, Any], mark_price: float) -> Dict[str, Any]:
+def build_manual_close_record(
+    trader: Any,
+    product_id: str,
+    position: Dict[str, Any],
+    mark_price: float,
+    exit_reason: str = "MANUAL_CLOSE_REQUEST",
+    source: str = "Manual paper close",
+) -> Dict[str, Any]:
     allocated = float(position.get("allocated_usd", trader.CAPITAL_PER_TRADE_USD) or 0)
     quantity = float(position.get("simulated_qty", 0) or 0)
     final_value = quantity * mark_price
@@ -145,7 +152,7 @@ def build_manual_close_record(trader: Any, product_id: str, position: Dict[str, 
         "strategy": "Automated Multi-Asset Watchlist Engine",
         "product_id": product_id,
         "mode": position.get("mode", "paper"),
-        "live_data_source": "Manual paper reset",
+        "live_data_source": source,
         "config": {
             "total_capital_usd": trader.TOTAL_CAPITAL_USD,
             "manual_close": True,
@@ -158,7 +165,7 @@ def build_manual_close_record(trader: Any, product_id: str, position: Dict[str, 
         },
         "exit": {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "reason": "MANUAL_RESET_CLOSED_AT_MARK",
+            "reason": exit_reason,
             "price_usd": mark_price,
             "highest_tracked_price_usd": float(position.get("highest_tracked_price", mark_price) or mark_price),
         },
@@ -167,6 +174,88 @@ def build_manual_close_record(trader: Any, product_id: str, position: Dict[str, 
             "pnl_percentage": pnl_pct,
             "status": "CLOSED",
         },
+    }
+
+
+def close_paper_positions(
+    trader: Any,
+    product_filter: str = "",
+    archive: bool = True,
+    exit_reason: str = "MANUAL_CLOSE_REQUEST",
+    source: str = "Manual paper close",
+) -> Dict[str, Any]:
+    active_positions = trader.load_json_file(trader.PORTFOLIO_FILE)
+    history = trader.load_json_file(trader.HISTORY_FILE)
+    daily_ledger = trader.load_daily_ledger()
+    if not isinstance(active_positions, dict):
+        active_positions = {}
+    if not isinstance(history, list):
+        history = []
+
+    product_filter = (product_filter or "").strip().upper()
+    closed_records = []
+    remaining_positions = {}
+    for product_id, position in active_positions.items():
+        if product_filter and product_id.upper() != product_filter:
+            remaining_positions[product_id] = position
+            continue
+
+        # This endpoint reconciles paper-state positions. It intentionally does
+        # not pretend to close live Coinbase holdings; live reconciliation should
+        # verify exchange balances/orders before mutating state.
+        if position.get("mode") == "live":
+            remaining_positions[product_id] = position
+            continue
+
+        fallback_price = float(position.get("highest_tracked_price") or position.get("entry_price") or 0.0)
+        mark_price = get_coinbase_mark_price(product_id, fallback=fallback_price)
+        if archive:
+            record = build_manual_close_record(
+                trader,
+                product_id,
+                position,
+                mark_price,
+                exit_reason=exit_reason,
+                source=source,
+            )
+            history.append(record)
+            closed_records.append(record)
+            trader.record_daily_pnl(
+                daily_ledger,
+                product_id,
+                float((record.get("performance") or {}).get("pnl_usd", 0) or 0),
+            )
+
+    if product_filter and len(closed_records) == 0 and product_filter not in active_positions:
+        return {
+            "error": "position_not_found",
+            "productId": product_filter,
+            "statusCode": 404,
+        }
+
+    trader.save_json_file(trader.PORTFOLIO_FILE, remaining_positions)
+    if archive and closed_records:
+        trader.save_json_file(trader.HISTORY_FILE, history)
+        trader.save_json_file(trader.DAILY_PNL_FILE, daily_ledger)
+
+    realized = sum(float((r.get("performance") or {}).get("pnl_usd", 0) or 0) for r in closed_records)
+    return {
+        "status": "ok",
+        "archived": archive,
+        "closedPositions": len(closed_records),
+        "remainingPositions": len(remaining_positions),
+        "realizedPnlUsd": round(realized, 2),
+        "productId": product_filter or None,
+        "closed": [
+            {
+                "productId": record.get("product_id"),
+                "exitPriceUsd": round(float((record.get("exit") or {}).get("price_usd") or 0), 10),
+                "pnlUsd": round(float((record.get("performance") or {}).get("pnl_usd") or 0), 2),
+                "pnlPercentage": round(float((record.get("performance") or {}).get("pnl_percentage") or 0), 4),
+                "exitReason": (record.get("exit") or {}).get("reason"),
+            }
+            for record in closed_records
+        ],
     }
 
 
@@ -1271,7 +1360,55 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
-@app.route(route="paper-trading/reset", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="paper-trading/close", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
+def paper_trading_close(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        import trader
+
+        try:
+            body = req.get_json()
+            if not isinstance(body, dict):
+                body = {}
+        except Exception:
+            body = {}
+
+        product_filter = (
+            req.params.get("productId")
+            or req.params.get("product_id")
+            or body.get("productId")
+            or body.get("product_id")
+            or ""
+        ).strip().upper()
+        close_all = str(req.params.get("all") or body.get("all") or "").strip().lower() == "true"
+        if not product_filter and not close_all:
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "product_required",
+                    "message": "Pass productId=COIN-USD to close one paper position, or all=true to close every open paper position.",
+                }),
+                status_code=400,
+                mimetype="application/json",
+            )
+
+        result = close_paper_positions(
+            trader,
+            product_filter=product_filter,
+            archive=True,
+            exit_reason="MANUAL_CLOSE_REQUEST",
+            source="Authenticated manual paper close",
+        )
+        status_code = int(result.pop("statusCode", 200))
+        return func.HttpResponse(json.dumps(result), status_code=status_code, mimetype="application/json")
+    except Exception as exc:
+        logging.exception("paper_trading_close failed: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": "close_failed", "message": str(exc)}),
+            status_code=500,
+            mimetype="application/json",
+        )
+
+
+@app.route(route="paper-trading/reset", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
 def paper_trading_reset(req: func.HttpRequest) -> func.HttpResponse:
     try:
         import trader
@@ -1290,56 +1427,15 @@ def paper_trading_reset(req: func.HttpRequest) -> func.HttpResponse:
         archive = (req.params.get("archive") or "true").strip().lower() != "false"
         product_filter = (req.params.get("productId") or req.params.get("product_id") or "").strip().upper()
 
-        active_positions = trader.load_json_file(trader.PORTFOLIO_FILE)
-        history = trader.load_json_file(trader.HISTORY_FILE)
-        daily_ledger = trader.load_daily_ledger()
-        if not isinstance(active_positions, dict):
-            active_positions = {}
-        if not isinstance(history, list):
-            history = []
-
-        closed_records = []
-        remaining_positions = {}
-        for product_id, position in active_positions.items():
-            if product_filter and product_id.upper() != product_filter:
-                remaining_positions[product_id] = position
-                continue
-            fallback_price = float(position.get("highest_tracked_price") or position.get("entry_price") or 0.0)
-            mark_price = get_coinbase_mark_price(product_id, fallback=fallback_price)
-            if archive:
-                record = build_manual_close_record(trader, product_id, position, mark_price)
-                history.append(record)
-                closed_records.append(record)
-                trader.record_daily_pnl(
-                    daily_ledger,
-                    product_id,
-                    float((record.get("performance") or {}).get("pnl_usd", 0) or 0),
-                )
-
-        if product_filter and len(closed_records) == 0 and product_filter not in active_positions:
-            return func.HttpResponse(
-                json.dumps({"error": "position_not_found", "productId": product_filter}),
-                status_code=404,
-                mimetype="application/json",
-            )
-
-        trader.save_json_file(trader.PORTFOLIO_FILE, remaining_positions)
-        if archive and closed_records:
-            trader.save_json_file(trader.HISTORY_FILE, history)
-            trader.save_json_file(trader.DAILY_PNL_FILE, daily_ledger)
-
-        realized = sum(float((r.get("performance") or {}).get("pnl_usd", 0) or 0) for r in closed_records)
-        return func.HttpResponse(
-            json.dumps({
-                "status": "ok",
-                "archived": archive,
-                "closedPositions": len(closed_records),
-                "remainingPositions": len(remaining_positions),
-                "realizedPnlUsd": round(realized, 2),
-                "productId": product_filter or None,
-            }),
-            mimetype="application/json",
+        result = close_paper_positions(
+            trader,
+            product_filter=product_filter,
+            archive=archive,
+            exit_reason="MANUAL_RESET_CLOSED_AT_MARK",
+            source="Manual paper reset",
         )
+        status_code = int(result.pop("statusCode", 200))
+        return func.HttpResponse(json.dumps(result), status_code=status_code, mimetype="application/json")
     except Exception as exc:
         logging.exception("paper_trading_reset failed: %s", exc)
         return func.HttpResponse(
