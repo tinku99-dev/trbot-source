@@ -1,0 +1,30 @@
+{
+  "folders": [
+    {
+      "name": "Python Trader (coinbase_paper_trader)",
+      "path": "coinbase_paper_trader"
+    },
+    {
+      "name": ".NET Research Bot (src)",
+      "path": "src/TradingResearchBot"
+    },
+    {
+      "name": "Dashboard (web)",
+      "path": "web"
+    },
+    {
+      "name": "Root (trbot-source)",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "git.openRepositoryInParentFolders": "always"
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-dotnettools.csharp",
+      "esbenp.prettier-vscode"
+    ]
+  }
+}
