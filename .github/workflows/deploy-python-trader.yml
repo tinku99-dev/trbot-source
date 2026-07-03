@@ -8,9 +8,10 @@ on:
       - ".github/workflows/deploy-python-trader.yml"
   workflow_dispatch:
 
-# Required GitHub secret:
-#   AZURE_FUNCTIONAPP_PUBLISH_PROFILE_PYTHON
-#     → Azure Portal → func-coinbase-trader-v2 → Overview → Get publish profile → copy XML contents
+# Required GitHub environment/repo values for Azure OIDC login:
+#   AZURE_CLIENT_ID        → secret or variable
+#   AZURE_TENANT_ID        → secret or variable
+#   AZURE_SUBSCRIPTION_ID  → secret or variable
 
 env:
   AZURE_FUNCTIONAPP_NAME: func-coinbase-trader-v2
@@ -19,6 +20,10 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
     defaults:
       run:
         working-directory: coinbase_paper_trader
@@ -34,11 +39,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
+
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: coinbase_paper_trader
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_PYTHON }}
           scm-do-build-during-deployment: true
           enable-oryx-build: true
