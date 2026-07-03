@@ -1,0 +1,42 @@
+name: Deploy .NET Research Bot (func-3qs3shmnmkj5m)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - ".github/workflows/deploy-dotnet-bot.yml"
+  workflow_dispatch:
+
+# Required GitHub secret:
+#   AZURE_FUNCTIONAPP_PUBLISH_PROFILE_DOTNET
+#     → Azure Portal → func-3qs3shmnmkj5m → Overview → Get publish profile → copy XML contents
+
+env:
+  AZURE_FUNCTIONAPP_NAME: func-3qs3shmnmkj5m
+  DOTNET_VERSION: "8.0.x"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore src/TradingResearchBot
+
+      - name: Build & publish
+        run: dotnet publish src/TradingResearchBot -c Release -o ./publish_out --no-restore
+
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: ./publish_out
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_DOTNET }}

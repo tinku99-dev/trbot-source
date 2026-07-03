@@ -5,6 +5,14 @@ out/
 
 # Azure Functions
 local.settings.json
+
+# Python trader runtime state (generated at runtime, not source)
+coinbase_paper_trader/active_paper_positions.json
+coinbase_paper_trader/daily_pnl_ledger.json
+coinbase_paper_trader/market_state_cache.json
+coinbase_paper_trader/summary_state.json
+coinbase_paper_trader/trading_history.json
+coinbase_paper_trader/crypto_scan_snapshot.json
 .python_packages/
 __azurite_db*__.json
 __blobstorage__/
