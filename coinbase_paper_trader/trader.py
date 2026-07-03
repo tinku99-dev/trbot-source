@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -236,6 +237,53 @@ DAILY_SUMMARY_STATE_FILE = "daily_summary_state.json"
 SHADOW_ALERTS_FILE = "shadow_signal_alerts.json"
 SCAN_SNAPSHOT_FILE = "crypto_scan_snapshot.json"
 
+# ---------------------------------------------------------------------------
+# Blob Storage fallback — survives function restarts on Consumption plan
+# Uses STATE_STORAGE_CONNECTION_STRING (or AzureWebJobsStorage) +
+# STATE_CONTAINER_NAME to persist all state files.
+# ---------------------------------------------------------------------------
+_BLOB_CONN_STR = (
+    os.environ.get("STATE_STORAGE_CONNECTION_STRING")
+    or os.environ.get("AzureWebJobsStorage", "")
+)
+_BLOB_CONTAINER = os.environ.get("STATE_CONTAINER_NAME", "cointracking-state")
+
+def _blob_name(filepath: str) -> str:
+    return "trader-state/" + os.path.basename(filepath)
+
+def _load_from_blob(filepath: str):
+    if not _BLOB_CONN_STR:
+        return None
+    try:
+        from azure.storage.blob import BlobServiceClient
+        client = BlobServiceClient.from_connection_string(_BLOB_CONN_STR)
+        blob = client.get_blob_client(container=_BLOB_CONTAINER, blob=_blob_name(filepath))
+        raw = blob.download_blob().readall().decode("utf-8")
+        data = json.loads(raw)
+        # Write local cache so subsequent calls skip blob
+        try:
+            with open(filepath, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=4)
+        except OSError:
+            pass
+        return data
+    except Exception:
+        return None
+
+def _save_to_blob(filepath: str, data) -> None:
+    if not _BLOB_CONN_STR:
+        return
+    try:
+        from azure.storage.blob import BlobServiceClient, ContainerClient
+        client = BlobServiceClient.from_connection_string(_BLOB_CONN_STR)
+        container: ContainerClient = client.get_container_client(_BLOB_CONTAINER)
+        if not container.exists():
+            container.create_container()
+        blob = container.get_blob_client(_blob_name(filepath))
+        blob.upload_blob(json.dumps(data, indent=4), overwrite=True)
+    except Exception as exc:
+        print(f"[Blob] save failed for {os.path.basename(filepath)}: {exc}")
+
 
 def _data_path(filename: str) -> str:
     """Resolves a state filename against DATA_DIR (created if needed)."""
@@ -291,11 +339,20 @@ def _validate_config():
               "(no API keys set).")
 
 
-def send_discord_alert(message: str) -> bool:
-    """Posts a trade alert to Discord via webhook (best-effort, never raises)."""
+_DISCORD_MAX_CHARS = 1900  # Discord limit is 2000; stay under with margin
+
+def send_discord_alert(message: str, retries: int = 3) -> bool:
+    """Posts a trade alert to Discord via webhook.
+    - Truncates messages over Discord's 2000-char limit.
+    - Retries up to 3× on HTTP 429 using the retry_after header.
+    - Adds a short sleep after each successful send to avoid rate-limit bursts.
+    - Never raises; returns True on success.
+    """
     if not DISCORD_WEBHOOK_URL:
         print("[Discord] DISCORD_WEBHOOK_URL is not set. Alert not sent.")
         return False
+    if len(message) > _DISCORD_MAX_CHARS:
+        message = message[:_DISCORD_MAX_CHARS] + "\n…(truncated)"
     payload = json.dumps({"content": message}).encode("utf-8")
     req = urllib.request.Request(
         DISCORD_WEBHOOK_URL,
@@ -303,31 +360,51 @@ def send_discord_alert(message: str) -> bool:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 — URL from env only
-            if resp.status not in (200, 204):
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310 — URL from env only
+                if resp.status in (200, 204):
+                    time.sleep(1.0)  # stay well under Discord's 30 msg/60s webhook limit
+                    return True
                 print(f"[Discord] Unexpected status {resp.status}")
                 return False
-            return True
-    except Exception as exc:
-        print(f"[Discord] Alert failed: {exc}")
-        return False
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                try:
+                    body = json.loads(exc.read().decode("utf-8"))
+                    wait = float(body.get("retry_after", 5))
+                except Exception:
+                    wait = 5.0
+                print(f"[Discord] Rate limited; retrying in {wait:.1f}s (attempt {attempt + 1}/{retries})")
+                time.sleep(wait)
+                continue
+            print(f"[Discord] HTTP error {exc.code}: {exc}")
+            return False
+        except Exception as exc:
+            print(f"[Discord] Alert failed: {exc}")
+            return False
+    print("[Discord] Gave up after retries.")
+    return False
 
 
 def load_json_file(filepath: str):
-    """Safely loads a JSON file; returns [] for history files, {} for others."""
+    """Loads JSON from local disk; falls back to blob storage on cold start."""
     filepath = _data_path(filepath)
-    if not os.path.exists(filepath):
-        return [] if "history" in filepath else {}
-    try:
-        with open(filepath, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (json.JSONDecodeError, OSError):
-        return [] if "history" in filepath else {}
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Local file missing (cold start / ephemeral disk) — try blob fallback
+    blob_data = _load_from_blob(filepath)
+    if blob_data is not None:
+        return blob_data
+    return [] if "history" in filepath else {}
 
 
 def save_json_file(filepath: str, data):
-    """Atomically writes JSON to disk to prevent corruption on crash."""
+    """Atomically writes JSON to local disk and mirrors to blob storage."""
     filepath = _data_path(filepath)
     tmp = filepath + ".tmp"
     try:
@@ -338,6 +415,8 @@ def save_json_file(filepath: str, data):
         print(f"[Ledger] Failed to save {filepath}: {exc}")
         if os.path.exists(tmp):
             os.remove(tmp)
+    # Write-through to blob so state survives instance restarts
+    _save_to_blob(filepath, data)
 
 
 def _utcnow_iso() -> str:
