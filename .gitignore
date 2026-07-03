@@ -1,0 +1,42 @@
+# Build output
+bin/
+obj/
+out/
+
+# Azure Functions
+local.settings.json
+.python_packages/
+__azurite_db*__.json
+__blobstorage__/
+__queuestorage__/
+.azurite/
+
+# azd (Azure Developer CLI) — holds per-env secrets in .azure/<env>/.env
+.azure/
+
+# User-specific / IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Secrets / env
+*.env
+appsettings.Development.json
+appsettings.Local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test results
+TestResults/
+*.trx
+coverage*.json
+coverage*.xml
+
+# Compiled ARM output from 'az bicep build'
+infra/main.json
+
+# azd deploy log
+azd-up.log

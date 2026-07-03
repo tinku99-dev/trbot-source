@@ -1,0 +1,77 @@
+:root {
+  --bg: #f3ead8;
+  --paper: #fffaf0;
+  --ink: #17212f;
+  --text: #2f3947;
+  --muted: #707887;
+  --line: rgba(23, 33, 47, 0.14);
+  --positive: #22805d;
+  --negative: #b53f3f;
+  --warning: #c9842b;
+  --shadow: 0 18px 44px rgba(23, 33, 47, 0.09);
+  --sans: 'Avenir Next', 'Trebuchet MS', sans-serif;
+  --heading: 'Avenir Next Condensed', 'DIN Condensed', 'Trebuchet MS', sans-serif;
+
+  font: 16px/1.45 var(--sans);
+  color: var(--text);
+  background:
+    linear-gradient(135deg, rgba(34, 128, 93, 0.13), transparent 32%),
+    linear-gradient(315deg, rgba(181, 63, 63, 0.1), transparent 30%),
+    radial-gradient(circle at 50% 0%, rgba(255, 250, 240, 0.9), transparent 38%),
+    var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100svh;
+  margin: 0;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(23, 33, 47, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(23, 33, 47, 0.045) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.65), transparent 76%);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+h1,
+h2 {
+  color: var(--ink);
+  font-family: var(--heading);
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+h1 {
+  font-size: clamp(38px, 6vw, 72px);
+  line-height: 0.92;
+}
+
+h2 {
+  font-size: 24px;
+  line-height: 1;
+}
+
+p {
+  margin: 0;
+}

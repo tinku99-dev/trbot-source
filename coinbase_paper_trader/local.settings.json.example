@@ -1,0 +1,29 @@
+{
+    "IsEncrypted": false,
+    "Values": {
+        "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+        "FUNCTIONS_WORKER_RUNTIME": "python",
+        "CB_API_KEY": "<your-coinbase-api-key>",
+        "CB_API_SECRET": "<your-coinbase-api-secret>",
+        "DISCORD_WEBHOOK_URL": "<your-discord-webhook-url>",
+        "TRADING_MODE": "paper",
+        "LIVE_TRADING_ENABLED": "false",
+        "MIN_PATTERN_SCORE_TO_BUY": "80",
+        "RECENT_TRIGGER_CANDLES": "3",
+        "MARKET_REGIME_FILTER": "true",
+        "BTC_15M_MAX_DROP_PCT": "-0.35",
+        "BTC_1H_MAX_DROP_PCT": "-0.80",
+        "MIN_REL_STRENGTH_VS_BTC": "0.50",
+        "MIN_24H_DOLLAR_VOLUME": "5000000",
+        "MIN_BREAKOUT_DOLLAR_VOLUME": "25000",
+        "OBV_CONFIRMATION": "true",
+        "OBV_LOOKBACK_CANDLES": "12",
+        "MIN_OBV_PRESSURE_PCT": "8.0",
+        "MIN_OBV_UP_VOLUME_RATIO": "0.52",
+        "CAPITAL_PER_TRADE_USD": "1000",
+        "MAX_OPEN_POSITIONS": "10",
+        "MAX_DAILY_LOSS_PER_COIN": "100",
+        "TAKE_PROFIT_PERCENT": "5.0",
+        "TRAILING_PERCENT": "2.0"
+    }
+}

@@ -1,0 +1,69 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "",
+
+    "//": "===== Trading research bot configuration (no secrets committed) =====",
+
+    "Bot__MarketProvider": "Mock",
+    "Bot__TimeZone": "Eastern Standard Time",
+    "Bot__MarketOpenLocal": "08:30",
+    "Bot__MarketCloseLocal": "15:00",
+    "Bot__MaxCandidates": "20",
+    "Bot__DryRun": "true",
+
+    "//Providers": "Licensed data APIs. MarketProvider: Mock | Polygon | LicensedHttp. Set keys via secrets.",
+    "Bot__Providers__Polygon__ApiKey": "",
+    "Bot__Providers__Polygon__BaseUrl": "https://api.polygon.io",
+    "Bot__Providers__Tradier__ApiKey": "",
+    "Bot__Providers__Tradier__BaseUrl": "https://api.tradier.com",
+
+    "//Universe": "Comma-separated symbols used by the mock/sample provider",
+    "Bot__StockUniverse": "AAPL,MSFT,NVDA,AMD,AMZN,GOOGL,META,TSLA,PLTR,MDB,AVGO,NFLX,CRM,JPM,XOM,BP,COST,AMAT,SMCI,COIN",
+    "Bot__CryptoUniverse": "BTC-USD,ETH-USD,SOL-USD,AVAX-USD,LINK-USD,MATIC-USD",
+
+    "//Screener200Ma": "Combined 200-day SMA screener thresholds",
+    "Bot__Sma200__Enabled": "true",
+    "Bot__Sma200__VolumeRatioMin": "1.20",
+    "Bot__Sma200__BounceZonePct": "2.0",
+    "Bot__Sma200__TargetPct": "10.0",
+    "Bot__Sma200__StopPct": "3.0",
+
+    "//Options": "Options research enrichment (Provider = Mock | LicensedHttp)",
+    "Bot__Options__Enabled": "true",
+    "Bot__Options__Provider": "Mock",
+
+    "//PaperTrading": "Simulated sizing added to Discord research alerts; no live orders are placed",
+    "Bot__PaperTrading__Enabled": "true",
+    "Bot__PaperTrading__CapitalPerTradeUsd": "1000",
+    "Bot__PaperTrading__MaxOpenPositions": "10",
+    "PaperTradingState__DataDir": "/Users/tinku/CodingHelp/trailing-stop-azure-function",
+
+    "//Scalp": "Alpaca-backed crypto scalp scanner with OBV accumulation confirmation",
+    "Bot__Scalp__Enabled": "false",
+    "Bot__Scalp__HigherTimeframe": "4Hour",
+    "Bot__Scalp__EntryTimeframe": "15Min",
+    "Bot__Scalp__RequireObvConfirmation": "true",
+    "Bot__Scalp__MinObvPressurePct": "8.0",
+    "Bot__Scalp__MinObvUpVolumeRatio": "0.52",
+
+    "//Alpaca": "Use MarketProvider=Alpaca plus paper keys for stock/crypto market data",
+    "Bot__Providers__Alpaca__ApiKeyId": "",
+    "Bot__Providers__Alpaca__ApiSecret": "",
+    "Bot__Providers__Alpaca__BaseUrl": "https://data.alpaca.markets",
+    "Bot__Providers__Alpaca__Feed": "iex",
+
+    "//Notifications": "Provider = None | Discord | Email | Both",
+    "Bot__Notifications__Provider": "None",
+    "Bot__Notifications__Discord__WebhookUrl": "",
+    "Bot__Notifications__Email__SmtpHost": "",
+    "Bot__Notifications__Email__SmtpPort": "587",
+    "Bot__Notifications__Email__UseSsl": "true",
+    "Bot__Notifications__Email__Username": "",
+    "Bot__Notifications__Email__Password": "",
+    "Bot__Notifications__Email__From": "",
+    "Bot__Notifications__Email__To": ""
+  }
+}

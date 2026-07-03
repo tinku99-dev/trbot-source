@@ -1,0 +1,11 @@
+.git*
+.vscode
+.idea
+**/obj
+**/bin
+**/tests
+local.settings.json
+appsettings.Development.json
+appsettings.Local.json
+*.user
+*.md

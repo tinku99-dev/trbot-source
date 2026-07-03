@@ -1,0 +1,167 @@
+[
+  {
+    "name": "AnalyzeTicker",
+    "scriptFile": "TradingResearchBot.dll",
+    "entryPoint": "TradingResearchBot.Functions.AnalyzeTickerHttpFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "get",
+          "post"
+        ],
+        "route": "analyze/{symbol}",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
+    "name": "CryptoScalpTimer",
+    "scriptFile": "TradingResearchBot.dll",
+    "entryPoint": "TradingResearchBot.Functions.CryptoScalpTimerFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "timer",
+        "direction": "In",
+        "type": "timerTrigger",
+        "schedule": "0 */15 * * * *",
+        "properties": {}
+      }
+    ]
+  },
+  {
+    "name": "DailyDigest",
+    "scriptFile": "TradingResearchBot.dll",
+    "entryPoint": "TradingResearchBot.Functions.DailyDigestTimerFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "timer",
+        "direction": "In",
+        "type": "timerTrigger",
+        "schedule": "0 10 20 * * 1-5",
+        "properties": {}
+      }
+    ]
+  },
+  {
+    "name": "PaperTradingSummary",
+    "scriptFile": "TradingResearchBot.dll",
+    "entryPoint": "TradingResearchBot.Functions.PaperTradingSummaryHttpFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "get"
+        ],
+        "route": "paper-trading/summary",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
+    "name": "ResearchTimer",
+    "scriptFile": "TradingResearchBot.dll",
+    "entryPoint": "TradingResearchBot.Functions.ResearchTimerFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "timer",
+        "direction": "In",
+        "type": "timerTrigger",
+        "schedule": "0 */10 * * * *",
+        "properties": {}
+      }
+    ]
+  },
+  {
+    "name": "RunNow",
+    "scriptFile": "TradingResearchBot.dll",
+    "entryPoint": "TradingResearchBot.Functions.RunNowHttpFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "post",
+          "get"
+        ],
+        "route": "run",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  },
+  {
+    "name": "ScalpNow",
+    "scriptFile": "TradingResearchBot.dll",
+    "entryPoint": "TradingResearchBot.Functions.ScalpNowHttpFunction.Run",
+    "language": "dotnet-isolated",
+    "properties": {
+      "IsCodeless": false
+    },
+    "bindings": [
+      {
+        "name": "req",
+        "direction": "In",
+        "type": "httpTrigger",
+        "authLevel": "Function",
+        "methods": [
+          "post",
+          "get"
+        ],
+        "route": "scalp",
+        "properties": {}
+      },
+      {
+        "name": "$return",
+        "type": "http",
+        "direction": "Out"
+      }
+    ]
+  }
+]

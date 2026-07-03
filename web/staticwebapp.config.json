@@ -1,0 +1,10 @@
+{
+  "$schema": "https://aka.ms/azure/static-web-apps-cli/schema",
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": ["/api/*", "*.json", "*.jpg", "*.gif", "*.png", "*.css", "*.js", "*.ico"]
+  },
+  "mimeTypes": {
+    ".json": "text/json"
+  }
+}
