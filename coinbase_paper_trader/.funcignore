@@ -1,0 +1,20 @@
+# Runtime state is persisted in Blob Storage. Never ship local state files in the
+# Function package, because deploy-time timestamps can make stale files look newer
+# than the real blob state.
+active_paper_positions.json
+trading_history.json
+market_state_cache.json
+daily_pnl_ledger.json
+summary_state.json
+daily_summary_state.json
+shadow_signal_alerts.json
+crypto_scan_snapshot.json
+active_trades_cache.json
+alert_history_cache.json
+*.tmp
+
+# Local-only config and generated caches.
+.env
+local.settings.json
+__pycache__/
+*.pyc

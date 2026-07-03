@@ -18,6 +18,7 @@ env:
   AZURE_SUBSCRIPTION_ID: 5f66945a-ed88-4f91-87bd-f3074c0d752c
   AZURE_RESOURCE_GROUP: rg-trbot-prod
   PYTHON_VERSION: "3.11"
+  DEPLOY_PACKAGE_PATH: python-trader-package
 
 jobs:
   build-and-deploy:
@@ -40,6 +41,14 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+
+      - name: Prepare deployment package without runtime state
+        run: |
+          set -euo pipefail
+          rm -rf "../$DEPLOY_PACKAGE_PATH"
+          mkdir -p "../$DEPLOY_PACKAGE_PATH"
+          cp function_app.py trader.py host.json requirements.txt "../$DEPLOY_PACKAGE_PATH/"
+          cp -R .python_packages "../$DEPLOY_PACKAGE_PATH/.python_packages"
 
       - name: Azure login
         uses: azure/login@v2
@@ -110,6 +119,6 @@ jobs:
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: coinbase_paper_trader
+          package: ${{ env.DEPLOY_PACKAGE_PATH }}
           scm-do-build-during-deployment: true
           enable-oryx-build: true

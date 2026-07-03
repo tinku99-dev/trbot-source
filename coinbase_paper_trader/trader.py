@@ -259,7 +259,7 @@ _BLOB_CONN_STR = (
 )
 _BLOB_CONTAINER = os.environ.get("STATE_CONTAINER_NAME", "cointracking-state")
 _BLOB_PRIMARY = os.environ.get("STATE_BLOB_PRIMARY", "true").lower() != "false"
-_STATE_RECONCILE_LOCAL_NEWER = os.environ.get("STATE_RECONCILE_LOCAL_NEWER", "true").lower() != "false"
+_STATE_RECONCILE_LOCAL_NEWER = os.environ.get("STATE_RECONCILE_LOCAL_NEWER", "false").lower() == "true"
 _STATE_BACKUP_ENABLED = os.environ.get("STATE_BACKUP_ENABLED", "true").lower() != "false"
 _STATE_BACKUP_PREFIX = os.environ.get("STATE_BACKUP_PREFIX", "trader-state-backups")
 _STATE_BACKUP_MIN_INTERVAL_SECONDS = int(os.environ.get("STATE_BACKUP_MIN_INTERVAL_SECONDS", "900"))
