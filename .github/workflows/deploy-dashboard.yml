@@ -53,7 +53,9 @@ jobs:
           VITE_PAPER_SUMMARY_URL: ${{ env.VITE_PAPER_SUMMARY_URL }}
           VITE_CRYPTO_SCAN_URL: ${{ env.VITE_CRYPTO_SCAN_URL }}
           VITE_TRBOT_FUNCTION_URL: ${{ env.VITE_TRBOT_FUNCTION_URL }}
-        run: npm run build
+        run: |
+          npm run build
+          cp staticwebapp.config.json dist/staticwebapp.config.json
 
       - name: Azure login
         uses: azure/login@v2
@@ -79,6 +81,6 @@ jobs:
           azure_static_web_apps_api_token: ${{ steps.swa-token.outputs.token }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: upload
-          app_location: web
-          output_location: dist
+          app_location: web/dist
+          output_location: ""
           skip_app_build: true
