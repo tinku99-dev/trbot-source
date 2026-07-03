@@ -112,6 +112,23 @@ RSI_PERIOD              = int(os.environ.get("RSI_PERIOD", "14"))
 # buying thin coins where a breakout candle is easy to spoof or hard to exit.
 MIN_24H_DOLLAR_VOLUME   = float(os.environ.get("MIN_24H_DOLLAR_VOLUME", "5000000"))
 MIN_BREAKOUT_DOLLAR_VOLUME = float(os.environ.get("MIN_BREAKOUT_DOLLAR_VOLUME", "25000"))
+RECENT_LIQUIDITY_WINDOW_CANDLES = int(os.environ.get("RECENT_LIQUIDITY_WINDOW_CANDLES", "6"))
+HIGH_CONSENSUS_MIN_COUNT = int(os.environ.get("HIGH_CONSENSUS_MIN_COUNT", "3"))
+HIGH_CONSENSUS_BREAKOUT_VOLUME_DISCOUNT = float(os.environ.get("HIGH_CONSENSUS_BREAKOUT_VOLUME_DISCOUNT", "0.80"))
+
+# Early momentum runners catch coins that are already moving hard intraday, but
+# have not formed the exact compression/breakout shape yet. These are riskier,
+# so they require recent dollar flow and OBV, and can use a lower 24h liquidity
+# floor only for this strategy.
+MOMENTUM_RUNNER_ENABLED = os.environ.get("MOMENTUM_RUNNER_ENABLED", "true").lower() == "true"
+MOMENTUM_RUNNER_MIN_SCORE_TO_BUY = float(os.environ.get("MOMENTUM_RUNNER_MIN_SCORE_TO_BUY", "78"))
+MOMENTUM_RUNNER_MIN_24H_CHANGE = float(os.environ.get("MOMENTUM_RUNNER_MIN_24H_CHANGE", "8.0"))
+MOMENTUM_RUNNER_MAX_24H_CHANGE = float(os.environ.get("MOMENTUM_RUNNER_MAX_24H_CHANGE", "40.0"))
+MOMENTUM_RUNNER_MIN_15M_CHANGE = float(os.environ.get("MOMENTUM_RUNNER_MIN_15M_CHANGE", "0.4"))
+MOMENTUM_RUNNER_MIN_1H_CHANGE = float(os.environ.get("MOMENTUM_RUNNER_MIN_1H_CHANGE", "1.2"))
+MOMENTUM_RUNNER_MIN_RECENT_DOLLAR_VOLUME = float(os.environ.get("MOMENTUM_RUNNER_MIN_RECENT_DOLLAR_VOLUME", "25000"))
+MOMENTUM_RUNNER_MIN_24H_DOLLAR_VOLUME = float(os.environ.get("MOMENTUM_RUNNER_MIN_24H_DOLLAR_VOLUME", "2500000"))
+MOMENTUM_RUNNER_MAX_POSITION_PCT = float(os.environ.get("MOMENTUM_RUNNER_MAX_POSITION_PCT", "75"))
 
 # OBV (On-Balance Volume) confirmation: price should be breaking out with net
 # accumulation, not just a thin candle. `obv_pressure_pct` normalizes OBV change
@@ -135,6 +152,7 @@ MIN_REL_STRENGTH_VS_BTC = float(os.environ.get("MIN_REL_STRENGTH_VS_BTC", "0.50"
 # Coinbase has no native 4h candle, so 4h is built from six 1h candles.
 MULTI_TIMEFRAME_CONFIRM = os.environ.get("MULTI_TIMEFRAME_CONFIRM", "true").lower() == "true"
 MTF_CONFIRM_MIN_SCORE   = float(os.environ.get("MTF_CONFIRM_MIN_SCORE", "35"))   # min pattern score on a confirm timeframe
+HIGH_CONSENSUS_MTF_TOLERANCE = float(os.environ.get("HIGH_CONSENSUS_MTF_TOLERANCE", "5"))
 MTF_GRAN_15M            = 900
 MTF_GRAN_1H             = 3600
 MTF_4H_AGG_FACTOR       = 4      # build 4h candles from four 1h candles
@@ -884,6 +902,14 @@ def fetch_candles(product_id: str, granularity: int = CANDLE_GRANULARITY) -> lis
     return data
 
 
+def recent_dollar_volume(candles: list[list], window: int = RECENT_LIQUIDITY_WINDOW_CANDLES) -> float:
+    """Returns traded USD value across the most recent N candles."""
+    if not candles:
+        return 0.0
+    selected = candles[-max(1, window):]
+    return sum(float(c[4] or 0.0) * float(c[5] or 0.0) for c in selected)
+
+
 def detect_breakout_pattern(product_id: str, candles: list[list] | None = None) -> dict:
     """
     Detects a pre/early breakout setup from OHLCV candles and scores it 0-100.
@@ -1361,6 +1387,71 @@ def detect_bollinger_reversal_signal(product_id: str, candles: list[list] | None
     return {"bollinger_score": round(min(score, 100.0), 1), "features": features}
 
 
+def detect_momentum_runner_signal(product_data: dict) -> dict:
+    """
+    Scores fast intraday continuation runners. This catches ALLO-style moves that
+    are up strongly on the day with fresh 15m/1h follow-through, even before a
+    clean compression breakout pattern appears.
+    """
+    if not MOMENTUM_RUNNER_ENABLED:
+        return {"momentum_runner_score": 0.0, "features": {}}
+
+    price_change_24h = float(product_data.get("price_change_24h", 0.0) or 0.0)
+    price_change_15m = float(product_data.get("price_change_15m", 0.0) or 0.0)
+    price_change_1h = float(product_data.get("price_change_1h", 0.0) or 0.0)
+    recent_volume_usd = float(product_data.get("recent_window_dollar_volume", 0.0) or 0.0)
+    obv = product_data.get("obv", {}) or {}
+    obv_pressure = float(obv.get("obv_pressure_pct", 0.0) or 0.0)
+    up_volume_ratio = float(obv.get("up_volume_ratio", 0.0) or 0.0)
+
+    if price_change_24h < MOMENTUM_RUNNER_MIN_24H_CHANGE:
+        return {"momentum_runner_score": 0.0, "features": {}}
+    if price_change_24h > MOMENTUM_RUNNER_MAX_24H_CHANGE:
+        return {"momentum_runner_score": 0.0, "features": {}}
+
+    score = 0.0
+
+    if 8 <= price_change_24h <= 25:
+        score += 30
+    elif 25 < price_change_24h <= MOMENTUM_RUNNER_MAX_24H_CHANGE:
+        score += 18
+
+    if price_change_15m >= 1.0:
+        score += 20
+    elif price_change_15m >= MOMENTUM_RUNNER_MIN_15M_CHANGE:
+        score += 12
+
+    if price_change_1h >= 3.0:
+        score += 20
+    elif price_change_1h >= MOMENTUM_RUNNER_MIN_1H_CHANGE:
+        score += 12
+
+    if recent_volume_usd >= MOMENTUM_RUNNER_MIN_RECENT_DOLLAR_VOLUME * 2:
+        score += 15
+    elif recent_volume_usd >= MOMENTUM_RUNNER_MIN_RECENT_DOLLAR_VOLUME:
+        score += 10
+
+    if obv_pressure >= MIN_OBV_PRESSURE_PCT and up_volume_ratio >= MIN_OBV_UP_VOLUME_RATIO:
+        score += 15
+    elif obv_pressure > 0 and up_volume_ratio >= 0.50:
+        score += 8
+
+    # Do not chase a runner that has already lost current-period follow-through.
+    if price_change_15m < 0 or price_change_1h < 0:
+        score *= 0.5
+
+    features = {
+        "strategy": "EARLY_MOMENTUM_RUNNER",
+        "price_change_24h": round(price_change_24h, 3),
+        "price_change_15m": round(price_change_15m, 3),
+        "price_change_1h": round(price_change_1h, 3),
+        "recent_window_dollar_volume": round(recent_volume_usd, 2),
+        "obv_pressure_pct": round(obv_pressure, 2),
+        "up_volume_ratio": round(up_volume_ratio, 3),
+    }
+    return {"momentum_runner_score": round(min(score, 100.0), 1), "features": features}
+
+
 def select_entry_signal(product_data: dict) -> dict:
     """
     Returns the strongest currently buyable signal for a product, with a
@@ -1423,6 +1514,14 @@ def select_entry_signal(product_data: dict) -> dict:
             "threshold": WEDGE_MIN_SCORE_TO_BUY,
             "features": product_data.get("wedge_features", {}) or {},
             "requires_mtf": False,  # already operates on 1h; MTF gate is redundant
+        },
+        {
+            "type": "momentum_runner",
+            "strategy": "EARLY_MOMENTUM_RUNNER",
+            "score": float(product_data.get("momentum_runner_score", 0.0) or 0.0),
+            "threshold": MOMENTUM_RUNNER_MIN_SCORE_TO_BUY,
+            "features": product_data.get("momentum_runner_features", {}) or {},
+            "requires_mtf": False,
         },
     ]
     candidates.sort(key=lambda item: item["score"], reverse=True)
@@ -1540,21 +1639,35 @@ def liquidity_filter_result(product_data: dict) -> dict:
     breakout_dollar_volume = max(
         float(features.get("breakout_candle_dollar_volume", 0.0) or 0.0),
         float(features.get("breakout_window_dollar_volume", 0.0) or 0.0),
+        float(product_data.get("recent_window_dollar_volume", 0.0) or 0.0),
         float((product_data.get("orb_features", {}) or {}).get("orb_breakout_dollar_volume", 0.0) or 0.0),
         float((product_data.get("bollinger_features", {}) or {}).get("bollinger_signal_dollar_volume", 0.0) or 0.0),
     )
 
-    if dollar_volume_24h < MIN_24H_DOLLAR_VOLUME:
+    signal = select_entry_signal(product_data)
+    breakout_volume_floor = MIN_BREAKOUT_DOLLAR_VOLUME
+    high_consensus = (
+        signal.get("eligible")
+        and int(signal.get("consensus_count", 0) or 0) >= HIGH_CONSENSUS_MIN_COUNT
+    )
+    if high_consensus:
+        discount = max(0.50, min(1.0, HIGH_CONSENSUS_BREAKOUT_VOLUME_DISCOUNT))
+        breakout_volume_floor = MIN_BREAKOUT_DOLLAR_VOLUME * discount
+    min_24h_dollar_volume = MIN_24H_DOLLAR_VOLUME
+    if signal.get("strategy") == "EARLY_MOMENTUM_RUNNER" and signal.get("eligible"):
+        min_24h_dollar_volume = min(MIN_24H_DOLLAR_VOLUME, MOMENTUM_RUNNER_MIN_24H_DOLLAR_VOLUME)
+
+    if dollar_volume_24h < min_24h_dollar_volume:
         return {
             "ok": False,
-            "reason": f"24h dollar volume ${dollar_volume_24h:,.0f} < ${MIN_24H_DOLLAR_VOLUME:,.0f}",
+            "reason": f"24h dollar volume ${dollar_volume_24h:,.0f} < ${min_24h_dollar_volume:,.0f}",
             "dollar_volume_24h": dollar_volume_24h,
             "breakout_dollar_volume": breakout_dollar_volume,
         }
-    if breakout_dollar_volume < MIN_BREAKOUT_DOLLAR_VOLUME:
+    if breakout_dollar_volume < breakout_volume_floor:
         return {
             "ok": False,
-            "reason": f"breakout candle volume ${breakout_dollar_volume:,.0f} < ${MIN_BREAKOUT_DOLLAR_VOLUME:,.0f}",
+            "reason": f"breakout candle volume ${breakout_dollar_volume:,.0f} < ${breakout_volume_floor:,.0f}",
             "dollar_volume_24h": dollar_volume_24h,
             "breakout_dollar_volume": breakout_dollar_volume,
         }
@@ -1563,6 +1676,8 @@ def liquidity_filter_result(product_data: dict) -> dict:
         "reason": "liquidity OK",
         "dollar_volume_24h": dollar_volume_24h,
         "breakout_dollar_volume": breakout_dollar_volume,
+        "breakout_volume_floor": breakout_volume_floor,
+        "min_24h_dollar_volume": min_24h_dollar_volume,
     }
 
 
@@ -1664,7 +1779,7 @@ def aggregate_candles(candles: list[list], factor: int) -> list[list]:
     return out
 
 
-def detect_multi_timeframe_signal(product_id: str) -> dict:
+def detect_multi_timeframe_signal(product_id: str, min_confirm_score: float = MTF_CONFIRM_MIN_SCORE) -> dict:
     """
     Multi-timeframe confirmation filter (Option A).
 
@@ -1687,9 +1802,9 @@ def detect_multi_timeframe_signal(product_id: str) -> dict:
     if b15["bearish"]:
         return {"confirmed": False, "reason": f"15m bearish ({b15['reason']})",
                 "summary": _mtf_summary(scores), "scores": scores}
-    if p15["pattern_score"] < MTF_CONFIRM_MIN_SCORE:
+    if p15["pattern_score"] < min_confirm_score:
         return {"confirmed": False,
-                "reason": f"15m weak ({p15['pattern_score']:.0f} < {MTF_CONFIRM_MIN_SCORE:.0f})",
+                "reason": f"15m weak ({p15['pattern_score']:.0f} < {min_confirm_score:.0f})",
                 "summary": _mtf_summary(scores), "scores": scores}
 
     # --- 1h trend confirmation ---
@@ -1801,7 +1916,9 @@ def get_market_snapshot(client) -> tuple[list[dict], dict]:
             })
             prices[prod["product_id"]] = price
 
-        products.sort(key=lambda x: x["volume_24h"], reverse=True)
+        # Rank by traded USD value, not raw token units. Raw volume lets cheap,
+        # high-supply tokens crowd out higher-priced movers like ZEC/WLD.
+        products.sort(key=lambda x: x["price"] * x["volume_24h"], reverse=True)
         products = products[:WATCHLIST_SIZE]
 
         # Log top 5 with their scores
@@ -1845,7 +1962,7 @@ def get_market_snapshot_public() -> tuple[list[dict], dict]:
         obv = calculate_obv_metrics(candles)
         price_chg_15m = candle_change_pct(candles, 3)
         price_chg_1h = candle_change_pct(candles, 12)
-        products.append({
+        product = {
             "product_id":            pid,
             "price":                 price,
             "volume_24h":            volume_24h,
@@ -1854,6 +1971,7 @@ def get_market_snapshot_public() -> tuple[list[dict], dict]:
             "price_change_15m":      round(price_chg_15m, 3),
             "price_change_1h":       round(price_chg_1h, 3),
             "volume_change_24h":     0.0,  # not derivable from candles; pattern path drives entries
+            "recent_window_dollar_volume": round(recent_dollar_volume(candles), 2),
             "score":                 compute_signal_score(price_chg, 0.0),
             "pre_breakout_score":    pat["pattern_score"],
             "pre_breakout_features": pat["features"],
@@ -1862,7 +1980,11 @@ def get_market_snapshot_public() -> tuple[list[dict], dict]:
             "bollinger_score":       bollinger["bollinger_score"],
             "bollinger_features":    bollinger["features"],
             "obv":                   obv,
-        })
+        }
+        momentum = detect_momentum_runner_signal(product)
+        product["momentum_runner_score"] = momentum["momentum_runner_score"]
+        product["momentum_runner_features"] = momentum["features"]
+        products.append(product)
         prices[pid] = price
         time.sleep(0.05)  # stay under the public rate limit
 
@@ -2125,6 +2247,7 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "orb_score": round(float(prod.get("orb_score", 0.0) or 0.0), 1),
             "bollinger_score": round(float(prod.get("bollinger_score", 0.0) or 0.0), 1),
             "wedge_score": round(float(prod.get("wedge_score", 0.0) or 0.0), 1),
+            "momentum_runner_score": round(float(prod.get("momentum_runner_score", 0.0) or 0.0), 1),
             "price_change_24h": round(float(prod.get("price_change_24h", 0.0) or 0.0), 2),
             "price_change_1h": round(float(prod.get("price_change_1h", 0.0) or 0.0), 2),
             "dollar_volume_24h": round(float(liquidity.get("dollar_volume_24h", 0.0) or 0.0), 2),
@@ -2176,7 +2299,12 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
     # Enrich each product with breakout pattern features and score.
     # Public snapshot already computed these; only fill in when missing.
     # Primary: candle-based detector. Fallback: rolling-snapshot detector.
-    candle_candidates = sorted(products, key=lambda x: x.get("volume_24h", 0), reverse=True)[:CANDLE_SCAN_LIMIT]
+    candle_candidates = sorted(
+        products,
+        key=lambda x: float(x.get("dollar_volume_24h", 0.0) or 0.0)
+        or (float(x.get("price", 0.0) or 0.0) * float(x.get("volume_24h", 0.0) or 0.0)),
+        reverse=True,
+    )[:CANDLE_SCAN_LIMIT]
     candle_ids = {p["product_id"] for p in candle_candidates}
 
     for prod in products:
@@ -2194,6 +2322,12 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             prod["bollinger_features"] = bollinger["features"]
             prod["bollinger_score"] = bollinger["bollinger_score"]
             prod["obv"] = calculate_obv_metrics(candles)
+            prod["recent_window_dollar_volume"] = round(recent_dollar_volume(candles), 2)
+            prod["price_change_15m"] = round(candle_change_pct(candles, 3), 3)
+            prod["price_change_1h"] = round(candle_change_pct(candles, 12), 3)
+            momentum = detect_momentum_runner_signal(prod)
+            prod["momentum_runner_score"] = momentum["momentum_runner_score"]
+            prod["momentum_runner_features"] = momentum["features"]
             wedge = detect_wedge_breakout(prod["product_id"])
             prod["wedge_features"] = wedge["features"]
             prod["wedge_score"] = wedge["wedge_score"]
@@ -2285,7 +2419,10 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             # the extra candle calls are limited to a handful per cycle.
             mtf_scores = {}
             if MULTI_TIMEFRAME_CONFIRM and signal["requires_mtf"]:
-                mtf = detect_multi_timeframe_signal(product_id)
+                mtf_min_score = MTF_CONFIRM_MIN_SCORE
+                if int(signal.get("consensus_count", 0) or 0) >= HIGH_CONSENSUS_MIN_COUNT:
+                    mtf_min_score = max(0.0, MTF_CONFIRM_MIN_SCORE - HIGH_CONSENSUS_MTF_TOLERANCE)
+                mtf = detect_multi_timeframe_signal(product_id, mtf_min_score)
                 mtf_scores = mtf["scores"]
                 if not mtf["confirmed"]:
                     print(f"  [MTF SKIP] {product_id}: {mtf['reason']} | {mtf['summary']}")
@@ -2293,6 +2430,9 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 print(f"  [MTF OK]   {product_id}: {mtf['summary']}")
 
             position_size      = _position_size_for_score(signal["score"])
+            if signal.get("strategy") == "EARLY_MOMENTUM_RUNNER":
+                momentum_cap = CAPITAL_PER_TRADE_USD * max(10.0, min(100.0, MOMENTUM_RUNNER_MAX_POSITION_PCT)) / 100.0
+                position_size = min(position_size, round(momentum_cap, 2))
             size_pct           = round(position_size / CAPITAL_PER_TRADE_USD * 100)
 
             if _budget_is_full(active_positions, next_size=position_size):
@@ -2379,6 +2519,8 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             active_positions[product_id]["bollinger_features"] = prod.get("bollinger_features", {})
             active_positions[product_id]["wedge_score"] = prod.get("wedge_score", 0)
             active_positions[product_id]["wedge_features"] = prod.get("wedge_features", {})
+            active_positions[product_id]["momentum_runner_score"] = prod.get("momentum_runner_score", 0)
+            active_positions[product_id]["momentum_runner_features"] = prod.get("momentum_runner_features", {})
             active_positions[product_id]["mtf_scores"] = mtf_scores
             active_positions[product_id]["dollar_volume_24h"] = liquidity.get("dollar_volume_24h", 0.0)
             active_positions[product_id]["breakout_dollar_volume"] = liquidity.get("breakout_dollar_volume", 0.0)
@@ -2400,7 +2542,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 f"{conf_emoji} Score: {signal['score']:.0f}/100 [{confidence_label}]  (raw {raw_score:.0f}{bonus_str})\n"
                 f"   Strategy: {signal['strategy'].replace('_', ' ')}\n"
                 f"   Confirmed by: {confirming_str}\n"
-                f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  (all /100)\n"
+                f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  |  Runner {prod.get('momentum_runner_score', 0):.0f}  (all /100)\n"
                 f"📈 TP: ${take_profit_target:,.6g} (+{TAKE_PROFIT_PERCENT:.0f}%)  |  Stop: ${initial_stop:,.6g} [{_stop_method}]\n"
                 f"💧 24h Vol: ${liquidity.get('dollar_volume_24h', 0.0):,.0f}  |  OBV: {obv.get('metrics', {}).get('obv_pressure_pct', 0.0):+.1f}%\n"
                 f"🏦 Budget used: ${_capital_deployed(active_positions):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions)}/{MAX_OPEN_POSITIONS} slots)"
