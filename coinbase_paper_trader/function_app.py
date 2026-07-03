@@ -122,6 +122,54 @@ def save_alert_history(alerts: List[Dict[str, Any]]) -> None:
     save_json_state(STATE_ALERTS_BLOB_NAME, ALERT_HISTORY_FILE_PATH, trimmed)
 
 
+def get_coinbase_mark_price(product_id: str, fallback: float = 0.0) -> float:
+    try:
+        response = requests.get(
+            f"{COINBASE_API_BASE}/products/{product_id}/ticker",
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return float(response.json().get("price") or fallback or 0.0)
+    except Exception as exc:
+        logging.warning("Coinbase mark price lookup failed for %s: %s", product_id, exc)
+        return float(fallback or 0.0)
+
+
+def build_manual_close_record(trader: Any, product_id: str, position: Dict[str, Any], mark_price: float) -> Dict[str, Any]:
+    allocated = float(position.get("allocated_usd", trader.CAPITAL_PER_TRADE_USD) or 0)
+    quantity = float(position.get("simulated_qty", 0) or 0)
+    final_value = quantity * mark_price
+    pnl_usd = final_value - allocated
+    pnl_pct = (pnl_usd / allocated * 100) if allocated else 0.0
+    return {
+        "strategy": "Automated Multi-Asset Watchlist Engine",
+        "product_id": product_id,
+        "mode": position.get("mode", "paper"),
+        "live_data_source": "Manual paper reset",
+        "config": {
+            "total_capital_usd": trader.TOTAL_CAPITAL_USD,
+            "manual_close": True,
+        },
+        "entry": {
+            "timestamp": position.get("entry_timestamp", ""),
+            "price_usd": float(position.get("entry_price", 0) or 0),
+            "allocated_capital_usd": allocated,
+            "simulated_quantity": quantity,
+        },
+        "exit": {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "reason": "MANUAL_RESET_CLOSED_AT_MARK",
+            "price_usd": mark_price,
+            "highest_tracked_price_usd": float(position.get("highest_tracked_price", mark_price) or mark_price),
+        },
+        "performance": {
+            "pnl_usd": pnl_usd,
+            "pnl_percentage": pnl_pct,
+            "status": "CLOSED",
+        },
+    }
+
+
 def record_alert(event_type: str, symbol: str, timeframe: str, details: Dict[str, Any]) -> None:
     alerts = load_alert_history()
     alerts.append(
@@ -1026,7 +1074,8 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
 
         live_prices = {}
         for product_id, position in active_positions.items():
-            live_prices[product_id] = float(position.get("highest_tracked_price") or position.get("entry_price") or 0.0)
+            fallback_price = float(position.get("highest_tracked_price") or position.get("entry_price") or 0.0)
+            live_prices[product_id] = get_coinbase_mark_price(product_id, fallback=fallback_price)
 
         # A position can produce TWO realized records: a PARTIAL (moon-bag
         # take-profit) and a CLOSED (final exit). Both carry realized pnl_usd, so
@@ -1048,6 +1097,7 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
         open_positions = []
         unrealized_total = 0.0
         total_invested_usd = 0.0
+        open_market_value_usd = 0.0
         for product_id, position in active_positions.items():
             entry_price = float(position.get("entry_price", 0) or 0)
             mark_price = float(live_prices.get(product_id, entry_price) or entry_price)
@@ -1059,7 +1109,9 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
             )
             total_invested_usd += original_allocated
             quantity = float(position.get("simulated_qty", 0) or 0)
-            pnl = (quantity * mark_price) - allocated
+            market_value = quantity * mark_price
+            open_market_value_usd += market_value
+            pnl = market_value - allocated
             pnl_pct = (pnl / allocated * 100) if allocated else 0.0
             unrealized_total += pnl
             open_positions.append({
@@ -1072,6 +1124,7 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
                 "markPriceUsd": mark_price,
                 "allocatedUsd": allocated,
                 "originalAllocatedUsd": original_allocated,
+                "marketValueUsd": round(market_value, 2),
                 "quantity": quantity,
                 "currentTrailingStop": float(position.get("current_trailing_stop", 0) or 0),
                 "currentTrailPct": float(position.get("current_trail_pct", 0) or 0),
@@ -1175,6 +1228,10 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
             key=lambda t: (t.get("exit") or {}).get("timestamp", ""),
             reverse=True,
         )[:max_trades]
+        allocated_total = sum(p["allocatedUsd"] for p in open_positions)
+        starting_capital_usd = float(trader.TOTAL_CAPITAL_USD)
+        available_cash_usd = starting_capital_usd + realized_total - allocated_total
+        total_equity_usd = available_cash_usd + open_market_value_usd
 
         payload = {
             # All keys are camelCase so the React dashboard can use this endpoint
@@ -1190,7 +1247,12 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
                 "openPositions": len(open_positions),
                 "unrealizedPnlUsd": round(unrealized_total, 2),
                 "totalPnlUsd": round(realized_total + unrealized_total, 2),
-                "allocatedUsd": round(sum(p["allocatedUsd"] for p in open_positions), 2),
+                "startingCapitalUsd": round(starting_capital_usd, 2),
+                "allocatedUsd": round(allocated_total, 2),
+                "availableCashUsd": round(available_cash_usd, 2),
+                "openMarketValueUsd": round(open_market_value_usd, 2),
+                "totalEquityUsd": round(total_equity_usd, 2),
+                "liquidationCashUsd": round(total_equity_usd, 2),
                 # Total capital ever committed to trade entries (open + closed/partial).
                 "totalInvestedUsd": round(total_invested_usd, 2),
             },
@@ -1204,6 +1266,84 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("paper_trading_summary failed: %s", exc)
         return func.HttpResponse(
             json.dumps({"error": str(exc)}),
+            status_code=500,
+            mimetype="application/json",
+        )
+
+
+@app.route(route="paper-trading/reset", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def paper_trading_reset(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        import trader
+
+        confirm = (req.params.get("confirm") or "").strip()
+        if confirm != "RESET":
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "confirmation_required",
+                    "message": "POST with ?confirm=RESET to archive open paper positions and clear the active-position blob.",
+                }),
+                status_code=400,
+                mimetype="application/json",
+            )
+
+        archive = (req.params.get("archive") or "true").strip().lower() != "false"
+        product_filter = (req.params.get("productId") or req.params.get("product_id") or "").strip().upper()
+
+        active_positions = trader.load_json_file(trader.PORTFOLIO_FILE)
+        history = trader.load_json_file(trader.HISTORY_FILE)
+        daily_ledger = trader.load_daily_ledger()
+        if not isinstance(active_positions, dict):
+            active_positions = {}
+        if not isinstance(history, list):
+            history = []
+
+        closed_records = []
+        remaining_positions = {}
+        for product_id, position in active_positions.items():
+            if product_filter and product_id.upper() != product_filter:
+                remaining_positions[product_id] = position
+                continue
+            fallback_price = float(position.get("highest_tracked_price") or position.get("entry_price") or 0.0)
+            mark_price = get_coinbase_mark_price(product_id, fallback=fallback_price)
+            if archive:
+                record = build_manual_close_record(trader, product_id, position, mark_price)
+                history.append(record)
+                closed_records.append(record)
+                trader.record_daily_pnl(
+                    daily_ledger,
+                    product_id,
+                    float((record.get("performance") or {}).get("pnl_usd", 0) or 0),
+                )
+
+        if product_filter and len(closed_records) == 0 and product_filter not in active_positions:
+            return func.HttpResponse(
+                json.dumps({"error": "position_not_found", "productId": product_filter}),
+                status_code=404,
+                mimetype="application/json",
+            )
+
+        trader.save_json_file(trader.PORTFOLIO_FILE, remaining_positions)
+        if archive and closed_records:
+            trader.save_json_file(trader.HISTORY_FILE, history)
+            trader.save_json_file(trader.DAILY_PNL_FILE, daily_ledger)
+
+        realized = sum(float((r.get("performance") or {}).get("pnl_usd", 0) or 0) for r in closed_records)
+        return func.HttpResponse(
+            json.dumps({
+                "status": "ok",
+                "archived": archive,
+                "closedPositions": len(closed_records),
+                "remainingPositions": len(remaining_positions),
+                "realizedPnlUsd": round(realized, 2),
+                "productId": product_filter or None,
+            }),
+            mimetype="application/json",
+        )
+    except Exception as exc:
+        logging.exception("paper_trading_reset failed: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": "reset_failed", "message": str(exc)}),
             status_code=500,
             mimetype="application/json",
         )
