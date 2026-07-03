@@ -232,6 +232,16 @@ TRAIL_TIERS = _parse_trail_tiers(TRAIL_TIERS_RAW)
 BEARISH_DROP_PCT      = float(os.environ.get("BEARISH_DROP_PCT", "1.5"))   # red candle size
 BEARISH_VOL_RATIO     = float(os.environ.get("BEARISH_VOL_RATIO", "1.5"))  # vol confirms selling
 
+# Exit quality controls. Without these, a noisy 5m bearish pattern can close a
+# $1000 position for only a few dollars before the setup has room to work.
+BREAKEVEN_STOP_ENABLED = os.environ.get("BREAKEVEN_STOP_ENABLED", "true").lower() == "true"
+BREAKEVEN_TRIGGER_PCT  = float(os.environ.get("BREAKEVEN_TRIGGER_PCT", "1.2"))
+BREAKEVEN_BUFFER_PCT   = float(os.environ.get("BREAKEVEN_BUFFER_PCT", "0.15"))
+BEARISH_EXIT_MIN_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_MIN_PROFIT_PCT", "3.0"))
+BEARISH_EXIT_MAX_LOSS_PCT   = float(os.environ.get("BEARISH_EXIT_MAX_LOSS_PCT", "-1.0"))
+BEARISH_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("BEARISH_EXIT_MIN_HOLD_MINUTES", "90"))
+BEARISH_EXIT_STALL_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_STALL_PROFIT_PCT", "0.75"))
+
 # Periodic Discord performance summary (total P/L, gain/loss, coins bought).
 SUMMARY_INTERVAL_HOURS = float(os.environ.get("SUMMARY_INTERVAL_HOURS", "6"))
 DAILY_SUMMARY_ENABLED  = os.environ.get("DAILY_SUMMARY_ENABLED", "true").lower() == "true"
@@ -2454,6 +2464,46 @@ def compute_trailing_stop_pct(product_id: str, entry_price: float, current_price
     return round(trail_pct, 3), round(profit_pct, 3)
 
 
+def _position_profit_pct(pos: dict, current_price: float) -> float:
+    entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+    return ((current_price - entry_price) / entry_price * 100) if entry_price else 0.0
+
+
+def _position_held_minutes(pos: dict) -> int:
+    entry_ts = pos.get("entry_timestamp", "")
+    if not entry_ts:
+        return 0
+    try:
+        entry_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+        return max(0, int((datetime.now(timezone.utc) - entry_dt).total_seconds() / 60))
+    except Exception:
+        return 0
+
+
+def _should_exit_on_bearish_reversal(pos: dict, current_price: float, reversal: dict) -> tuple[bool, str]:
+    """
+    Filters noisy bearish-reversal exits. We still exit immediately to protect a
+    meaningful profit, after partial TP, or when the reversal is already causing
+    a real drawdown. Small green trades get more room instead of churning.
+    """
+    profit_pct = _position_profit_pct(pos, current_price)
+    held_minutes = _position_held_minutes(pos)
+
+    if pos.get("partial_take_profit_taken"):
+        return True, "moon bag has already paid; protect runner"
+    if profit_pct <= BEARISH_EXIT_MAX_LOSS_PCT:
+        return True, f"loss {profit_pct:+.2f}% <= {BEARISH_EXIT_MAX_LOSS_PCT:+.2f}%"
+    if profit_pct >= BEARISH_EXIT_MIN_PROFIT_PCT:
+        return True, f"lock meaningful gain {profit_pct:+.2f}%"
+    if held_minutes >= BEARISH_EXIT_MIN_HOLD_MINUTES and profit_pct <= BEARISH_EXIT_STALL_PROFIT_PCT:
+        return True, f"stalled {held_minutes}m with {profit_pct:+.2f}%"
+
+    return False, (
+        f"hold despite {reversal.get('reason', 'bearish signal')}: "
+        f"{profit_pct:+.2f}% after {held_minutes}m"
+    )
+
+
 def _migrate_legacy_position(pos: dict) -> bool:
     """Back-fills fields that were added after a position was first persisted.
     Returns True if any field was updated (signals the caller to save the file)."""
@@ -2519,6 +2569,25 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
         # Back-fill any fields that were added after this position was persisted.
         if _migrate_legacy_position(pos):
             changed = True
+
+        entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+        profit_pct_now = _position_profit_pct(pos, current_price)
+
+        # Once the trade has moved enough in our favor, pull the stop above
+        # breakeven. This protects capital while still letting the setup attempt
+        # the real take-profit target instead of closing on tiny noisy reversals.
+        if BREAKEVEN_STOP_ENABLED and entry_price > 0 and profit_pct_now >= BREAKEVEN_TRIGGER_PCT:
+            breakeven_stop = entry_price * (1 + BREAKEVEN_BUFFER_PCT / 100)
+            current_stop = float(pos.get("current_trailing_stop", 0.0) or 0.0)
+            if breakeven_stop > current_stop:
+                pos["current_trailing_stop"] = breakeven_stop
+                pos["breakeven_stop_active"] = True
+                changed = True
+                print(
+                    f"  [STOP BE] {product_id} +{profit_pct_now:.2f}% → "
+                    f"stop raised to ${breakeven_stop:,.6g} "
+                    f"(entry +{BREAKEVEN_BUFFER_PCT:.2f}%)"
+                )
 
         # Ratchet trailing stop upward. The trail width widens as unrealized
         # profit grows (tiers) and adapts to volatility (ATR), so proven runners
@@ -2647,8 +2716,12 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
             # Bearish-reversal exit: leave before the trailing stop if the trend flips.
             reversal = detect_bearish_reversal(product_id)
             if reversal["bearish"]:
-                exit_triggered = True
-                exit_reason    = f"BEARISH_REVERSAL_{reversal['reason']}"
+                should_exit, decision_reason = _should_exit_on_bearish_reversal(pos, current_price, reversal)
+                if should_exit:
+                    exit_triggered = True
+                    exit_reason    = f"BEARISH_REVERSAL_{reversal['reason']}"
+                else:
+                    print(f"  [BEARISH HOLD] {product_id}: {decision_reason}")
 
         if exit_triggered:
             initial_value = pos.get("allocated_usd", CAPITAL_PER_TRADE_USD)
