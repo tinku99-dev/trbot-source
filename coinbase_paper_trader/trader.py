@@ -33,6 +33,14 @@ TOTAL_CAPITAL_USD     = float(os.environ.get(
     "TOTAL_CAPITAL_USD", str(CAPITAL_PER_TRADE_USD * MAX_OPEN_POSITIONS)))      # $10,000 budget
 MAX_DAILY_LOSS_PER_COIN = float(os.environ.get("MAX_DAILY_LOSS_PER_COIN", "100"))  # per-coin/day
 
+# Dynamic position sizing by signal score
+# Size scales linearly from DYNAMIC_SIZE_MIN_PCT% (at MIN_SIGNAL_SCORE)
+# to DYNAMIC_SIZE_MAX_PCT% (at score 100) of CAPITAL_PER_TRADE_USD.
+# Set DYNAMIC_SIZING_ENABLED=false to revert to a fixed size.
+DYNAMIC_SIZING_ENABLED  = os.environ.get("DYNAMIC_SIZING_ENABLED", "true").lower() == "true"
+DYNAMIC_SIZE_MIN_PCT    = float(os.environ.get("DYNAMIC_SIZE_MIN_PCT",  "50"))   # % at lowest allowed score
+DYNAMIC_SIZE_MAX_PCT    = float(os.environ.get("DYNAMIC_SIZE_MAX_PCT", "150"))   # % at score 100
+
 # Minimum probability score (0-100) required before entering a position
 MIN_SIGNAL_SCORE    = float(os.environ.get("MIN_SIGNAL_SCORE",    "80"))
 
@@ -1668,16 +1676,36 @@ def evaluate_market_entry_signal(product_data: dict) -> bool:
 # TRADE EXECUTION
 # ---------------------------------------------------------------------------
 
+def _position_size_for_score(score: float) -> float:
+    """Returns the dollar position size to deploy based on signal score.
+
+    Linearly interpolates between DYNAMIC_SIZE_MIN_PCT% (at MIN_SIGNAL_SCORE)
+    and DYNAMIC_SIZE_MAX_PCT% (at score 100) of CAPITAL_PER_TRADE_USD.
+    Always clamped to [50%, 200%] of CAPITAL_PER_TRADE_USD.
+    Falls back to a fixed CAPITAL_PER_TRADE_USD when dynamic sizing is off.
+    """
+    if not DYNAMIC_SIZING_ENABLED:
+        return CAPITAL_PER_TRADE_USD
+    score = max(float(MIN_SIGNAL_SCORE), min(100.0, float(score)))
+    score_range = 100.0 - float(MIN_SIGNAL_SCORE)
+    pct = DYNAMIC_SIZE_MIN_PCT + (DYNAMIC_SIZE_MAX_PCT - DYNAMIC_SIZE_MIN_PCT) * \
+          ((score - float(MIN_SIGNAL_SCORE)) / score_range if score_range > 0 else 1.0)
+    pct = max(50.0, min(200.0, pct))  # hard clamp regardless of env vars
+    return round(CAPITAL_PER_TRADE_USD * pct / 100.0, 2)
+
+
 def _capital_deployed(active_positions: dict) -> float:
-    """Returns total USD currently locked in open positions."""
-    return len(active_positions) * CAPITAL_PER_TRADE_USD
+    """Returns total USD currently locked in open positions (uses actual allocated_usd)."""
+    return sum(float(p.get("allocated_usd") or CAPITAL_PER_TRADE_USD)
+               for p in active_positions.values())
 
 
-def _budget_is_full(active_positions: dict) -> bool:
-    """Returns True when another configured position would exceed limits."""
+def _budget_is_full(active_positions: dict, next_size: float | None = None) -> bool:
+    """Returns True when opening another position would exceed limits."""
     if len(active_positions) >= MAX_OPEN_POSITIONS:
         return True
-    return (_capital_deployed(active_positions) + CAPITAL_PER_TRADE_USD) > TOTAL_CAPITAL_USD
+    size = next_size if next_size is not None else CAPITAL_PER_TRADE_USD
+    return (_capital_deployed(active_positions) + size) > TOTAL_CAPITAL_USD
 
 
 def _shadow_alert_key(product_id: str, strategy: str) -> str:
@@ -2015,7 +2043,10 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                     continue
                 print(f"  [MTF OK]   {product_id}: {mtf['summary']}")
 
-            if _budget_is_full(active_positions):
+            position_size      = _position_size_for_score(signal["score"])
+            size_pct           = round(position_size / CAPITAL_PER_TRADE_USD * 100)
+
+            if _budget_is_full(active_positions, next_size=position_size):
                 budget_skip_reason = (
                     f"budget is full ({len(active_positions)}/{MAX_OPEN_POSITIONS} positions, "
                     f"${_capital_deployed(active_positions):,.0f}/${TOTAL_CAPITAL_USD:,.0f} deployed)"
@@ -2026,7 +2057,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                     break
                 continue
 
-            crypto_qty         = CAPITAL_PER_TRADE_USD / price
+            crypto_qty         = position_size / price
             initial_stop       = price * (1 - TRAILING_PERCENT / 100)
             take_profit_target = price * (1 + TAKE_PROFIT_PERCENT / 100)
             mode_label         = "LIVE BUY" if LIVE_ORDERS_ACTIVE else "PAPER BUY"
@@ -2055,10 +2086,11 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 "mode":                   "live" if LIVE_ORDERS_ACTIVE else "paper",
                 "entry_timestamp":        _utcnow_iso(),
                 "entry_price":            price,
-                "allocated_usd":          CAPITAL_PER_TRADE_USD,
-                "original_allocated_usd": CAPITAL_PER_TRADE_USD,
+                "allocated_usd":          position_size,
+                "original_allocated_usd": position_size,
                 "simulated_qty":          crypto_qty,
                 "original_simulated_qty": crypto_qty,
+                "position_size_pct":      size_pct,
                 "highest_tracked_price":  price,
                 "current_trailing_stop":  initial_stop,
                 "take_profit_boundary":   take_profit_target,
@@ -2098,14 +2130,14 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             confirming_str = " + ".join(s.replace("_", " ") for s in confirming_strategies)
             msg = (
                 f"{mode_emoji} [{mode_label}] {product_id}\n"
-                f"💵 Entry: ${price:,.6g}  |  Size: ${CAPITAL_PER_TRADE_USD:,.0f}  |  Qty: {crypto_qty:.6g}\n"
+                f"💵 Entry: ${price:,.6g}  |  Size: ${position_size:,.0f} ({size_pct}% · score {signal['score']:.0f})  |  Qty: {crypto_qty:.6g}\n"
                 f"{conf_emoji} Score: {signal['score']:.0f}/100 [{confidence_label}]  (raw {raw_score:.0f}{bonus_str})\n"
                 f"   Strategy: {signal['strategy'].replace('_', ' ')}\n"
                 f"   Confirmed by: {confirming_str}\n"
                 f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  (all /100)\n"
                 f"📈 TP: ${take_profit_target:,.6g} (+{TAKE_PROFIT_PERCENT:.0f}%)  |  Stop: ${initial_stop:,.6g} (-{TRAILING_PERCENT:.1f}%)\n"
                 f"💧 24h Vol: ${liquidity.get('dollar_volume_24h', 0.0):,.0f}  |  OBV: {obv.get('metrics', {}).get('obv_pressure_pct', 0.0):+.1f}%\n"
-                f"🏦 Budget used: ${_capital_deployed(active_positions):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}"
+                f"🏦 Budget used: ${_capital_deployed(active_positions):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions)}/{MAX_OPEN_POSITIONS} slots)"
             )
             print(f"  {msg}")
             send_discord_alert(msg)
