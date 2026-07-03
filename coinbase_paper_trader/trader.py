@@ -203,7 +203,13 @@ CONSENSUS_SINGLE_THRESHOLD_BUMP = float(os.environ.get("CONSENSUS_SINGLE_THRESHO
 CONSENSUS_DUAL_BONUS            = float(os.environ.get("CONSENSUS_DUAL_BONUS",            "8"))   # +8 pts when 2 strategies agree
 CONSENSUS_TRIPLE_BONUS          = float(os.environ.get("CONSENSUS_TRIPLE_BONUS",          "15"))  # +15 pts when 3+ strategies agree
 
-TAKE_PROFIT_PERCENT   = float(os.environ.get("TAKE_PROFIT_PERCENT",  "15.0")) # 15% first target
+TAKE_PROFIT_PERCENT   = float(os.environ.get("TAKE_PROFIT_PERCENT",  "15.0")) # legacy/default first target
+NORMAL_TAKE_PROFIT_PERCENT = float(os.environ.get("NORMAL_TAKE_PROFIT_PERCENT", "8.0"))
+RUNNER_TAKE_PROFIT_PERCENT = float(os.environ.get("RUNNER_TAKE_PROFIT_PERCENT", "18.0"))
+WEDGE_TAKE_PROFIT_PERCENT = float(os.environ.get("WEDGE_TAKE_PROFIT_PERCENT", "20.0"))
+HIGH_CONSENSUS_TAKE_PROFIT_PERCENT = float(os.environ.get("HIGH_CONSENSUS_TAKE_PROFIT_PERCENT", "15.0"))
+HIGH_CONSENSUS_TP_MIN_COUNT = int(os.environ.get("HIGH_CONSENSUS_TP_MIN_COUNT", "3"))
+HIGH_CONSENSUS_TP_MIN_SCORE = float(os.environ.get("HIGH_CONSENSUS_TP_MIN_SCORE", "90.0"))
 TRAILING_PERCENT      = float(os.environ.get("TRAILING_PERCENT",     "5.0"))  # 5% trailing floor
 MOON_BAG_PERCENT      = max(0.0, min(100.0, float(os.environ.get("MOON_BAG_PERCENT", "30.0"))))
 TAKE_PROFIT_SELL_PERCENT = 100.0 - MOON_BAG_PERCENT
@@ -2051,6 +2057,30 @@ def evaluate_market_entry_signal(product_data: dict) -> bool:
 # TRADE EXECUTION
 # ---------------------------------------------------------------------------
 
+def _take_profit_percent_for_signal(signal: dict) -> tuple[float, str]:
+    """Returns the main TP percent and reason for the selected entry signal."""
+    strategy = str(signal.get("strategy", "") or "").upper()
+    score = float(signal.get("score", 0.0) or 0.0)
+    consensus = int(signal.get("consensus_count", 0) or 0)
+
+    if strategy == "DESCENDING_WEDGE_BREAKOUT":
+        return WEDGE_TAKE_PROFIT_PERCENT, "wedge breakout"
+    if strategy == "EARLY_MOMENTUM_RUNNER":
+        return RUNNER_TAKE_PROFIT_PERCENT, "momentum runner"
+    if consensus >= HIGH_CONSENSUS_TP_MIN_COUNT and score >= HIGH_CONSENSUS_TP_MIN_SCORE:
+        return HIGH_CONSENSUS_TAKE_PROFIT_PERCENT, f"high consensus {consensus}x score {score:.0f}"
+    return NORMAL_TAKE_PROFIT_PERCENT, "normal breakout"
+
+
+def _take_profit_percent_for_position(pos: dict) -> tuple[float, str]:
+    signal = {
+        "strategy": pos.get("entry_strategy", ""),
+        "score": pos.get("entry_strategy_score", pos.get("signal_score", 0.0)),
+        "consensus_count": pos.get("entry_consensus_count", 0),
+    }
+    return _take_profit_percent_for_signal(signal)
+
+
 def _position_size_for_score(score: float) -> float:
     """Returns the dollar position size to deploy based on signal score.
 
@@ -2278,8 +2308,9 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
         eligible = signal["eligible"] and liquidity["ok"] and obv["ok"]
         liquidity_ok = liquidity["ok"]
         stop_loss = price * (1 - TRAILING_PERCENT / 100)
-        target1 = price * (1 + TAKE_PROFIT_PERCENT / 100)
-        target2 = price * (1 + (TAKE_PROFIT_PERCENT * 2) / 100)
+        target_pct, target_reason = _take_profit_percent_for_signal(signal)
+        target1 = price * (1 + target_pct / 100)
+        target2 = price * (1 + (target_pct * 2) / 100)
 
         rows.append({
             "product_id": product_id,
@@ -2311,6 +2342,8 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "stop_loss": round(stop_loss, 6),
             "target1": round(target1, 6),
             "target2": round(target2, 6),
+            "take_profit_pct": round(target_pct, 2),
+            "take_profit_reason": target_reason,
         })
 
     # Tier the results so the dashboard surfaces actionable coins first:
@@ -2335,6 +2368,10 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
         "config": {
             "capital_per_trade_usd": CAPITAL_PER_TRADE_USD,
             "take_profit_pct": TAKE_PROFIT_PERCENT,
+            "normal_take_profit_pct": NORMAL_TAKE_PROFIT_PERCENT,
+            "runner_take_profit_pct": RUNNER_TAKE_PROFIT_PERCENT,
+            "wedge_take_profit_pct": WEDGE_TAKE_PROFIT_PERCENT,
+            "high_consensus_take_profit_pct": HIGH_CONSENSUS_TAKE_PROFIT_PERCENT,
             "trailing_pct": TRAILING_PERCENT,
             "min_signal_score": MIN_SIGNAL_SCORE,
         },
@@ -2521,7 +2558,8 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             else:
                 initial_stop    = price * (1 - TRAILING_PERCENT / 100)
                 _stop_method    = f"flat {TRAILING_PERCENT:.1f}%"
-            take_profit_target = price * (1 + TAKE_PROFIT_PERCENT / 100)
+            main_tp_pct, main_tp_reason = _take_profit_percent_for_signal(signal)
+            take_profit_target = price * (1 + main_tp_pct / 100)
             mode_label         = "LIVE BUY" if LIVE_ORDERS_ACTIVE else "PAPER BUY"
 
             if LIVE_ORDERS_ACTIVE:
@@ -2556,6 +2594,8 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 "highest_tracked_price":  price,
                 "current_trailing_stop":  initial_stop,
                 "take_profit_boundary":   take_profit_target,
+                "main_take_profit_percent": main_tp_pct,
+                "main_take_profit_reason": main_tp_reason,
                 "quick_take_profit_boundary": price * (1 + QUICK_TAKE_PROFIT_PERCENT / 100),
                 "quick_take_profit_taken": False,
                 "partial_take_profit_taken": False,
@@ -2605,7 +2645,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 f"   Strategy: {signal['strategy'].replace('_', ' ')}\n"
                 f"   Confirmed by: {confirming_str}\n"
                 f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  |  Runner {prod.get('momentum_runner_score', 0):.0f}  (all /100)\n"
-                f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%/{QUICK_TAKE_PROFIT_SELL_PERCENT:.0f}%  |  Main TP: ${take_profit_target:,.6g} (+{TAKE_PROFIT_PERCENT:.0f}%)  |  Stop: ${initial_stop:,.6g} [{_stop_method}]\n"
+                f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%/{QUICK_TAKE_PROFIT_SELL_PERCENT:.0f}%  |  Main TP: ${take_profit_target:,.6g} (+{main_tp_pct:.0f}% {main_tp_reason})  |  Stop: ${initial_stop:,.6g} [{_stop_method}]\n"
                 f"💧 24h Vol: ${liquidity.get('dollar_volume_24h', 0.0):,.0f}  |  OBV: {obv.get('metrics', {}).get('obv_pressure_pct', 0.0):+.1f}%\n"
                 f"🏦 Budget used: ${_capital_deployed(active_positions):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions)}/{MAX_OPEN_POSITIONS} slots)"
                 f"{sizing_note}"
@@ -2737,8 +2777,8 @@ def _migrate_legacy_position(pos: dict) -> bool:
         pos["quick_take_profit_sell_percent"] = QUICK_TAKE_PROFIT_SELL_PERCENT
         changed = True
 
-    # If the stored TP boundary reflects a LOWER TP% than the current env var,
-    # upgrade it so old positions benefit from the corrected setting.
+    # Keep open positions aligned with strategy-specific main targets. Normal
+    # breakouts should not wait for runner-sized moves, while runners/wedges can.
     entry_price = float(pos.get("entry_price", 0.0) or 0.0)
     current_tp = float(pos.get("take_profit_boundary", 0.0) or 0.0)
     if entry_price > 0 and "quick_take_profit_boundary" not in pos:
@@ -2746,14 +2786,22 @@ def _migrate_legacy_position(pos: dict) -> bool:
         changed = True
     if entry_price > 0 and current_tp > 0 and not pos.get("partial_take_profit_taken"):
         stored_tp_pct = (current_tp - entry_price) / entry_price * 100
-        if stored_tp_pct < TAKE_PROFIT_PERCENT - 0.5:   # allow 0.5% tolerance
-            pos["take_profit_boundary"] = round(entry_price * (1 + TAKE_PROFIT_PERCENT / 100), 8)
+        desired_tp_pct, desired_tp_reason = _take_profit_percent_for_position(pos)
+        if abs(stored_tp_pct - desired_tp_pct) > 0.25:
+            pos["take_profit_boundary"] = round(entry_price * (1 + desired_tp_pct / 100), 8)
+            pos["main_take_profit_percent"] = desired_tp_pct
+            pos["main_take_profit_reason"] = desired_tp_reason
             print(
-                f"  [MIGRATE] {pos.get('product_id','?')} TP upgraded from "
-                f"+{stored_tp_pct:.1f}% → +{TAKE_PROFIT_PERCENT:.1f}% "
+                f"  [MIGRATE] {pos.get('product_id','?')} TP adjusted from "
+                f"+{stored_tp_pct:.1f}% → +{desired_tp_pct:.1f}% ({desired_tp_reason}) "
                 f"(${current_tp:,.6g} → ${pos['take_profit_boundary']:,.6g})"
             )
             changed = True
+    if "main_take_profit_percent" not in pos and entry_price > 0:
+        desired_tp_pct, desired_tp_reason = _take_profit_percent_for_position(pos)
+        pos["main_take_profit_percent"] = desired_tp_pct
+        pos["main_take_profit_reason"] = desired_tp_reason
+        changed = True
 
     # entry_strategy: infer from available features when missing.
     if not pos.get("entry_strategy"):
@@ -2864,6 +2912,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                     pos["current_trailing_stop"] = breakeven_stop
                     pos["breakeven_stop_active"] = True
 
+                main_tp_pct = float(pos.get("main_take_profit_percent", TAKE_PROFIT_PERCENT) or TAKE_PROFIT_PERCENT)
                 trade_record = {
                     "strategy":         "Automated Multi-Asset Watchlist Engine",
                     "product_id":       product_id,
@@ -2873,7 +2922,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                         "trailing_percent":                 TRAILING_PERCENT,
                         "quick_take_profit_percent":        QUICK_TAKE_PROFIT_PERCENT,
                         "quick_take_profit_sell_percent":   sell_fraction * 100,
-                        "take_profit_percent":              TAKE_PROFIT_PERCENT,
+                        "take_profit_percent":              main_tp_pct,
                         "total_capital_usd":                TOTAL_CAPITAL_USD,
                     },
                     "entry": {
@@ -2954,6 +3003,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                 )
                 pos["current_trail_pct"] = moon_trail_pct
 
+                main_tp_pct = float(pos.get("main_take_profit_percent", TAKE_PROFIT_PERCENT) or TAKE_PROFIT_PERCENT)
                 trade_record = {
                     "strategy":         "Automated Multi-Asset Watchlist Engine",
                     "product_id":       product_id,
@@ -2961,7 +3011,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                     "live_data_source": "Coinbase Advanced API",
                     "config": {
                         "trailing_percent":           TRAILING_PERCENT,
-                        "take_profit_percent":        TAKE_PROFIT_PERCENT,
+                        "take_profit_percent":        main_tp_pct,
                         "take_profit_sell_percent":   sell_fraction * 100,
                         "moon_bag_percent":           100 - (sell_fraction * 100),
                         "total_capital_usd":          TOTAL_CAPITAL_USD,
@@ -3047,6 +3097,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                     print(f"  [LIVE SELL ERROR] {product_id}: {exc}")
                     continue
 
+            main_tp_pct = float(pos.get("main_take_profit_percent", TAKE_PROFIT_PERCENT) or TAKE_PROFIT_PERCENT)
             trade_record = {
                 "strategy":         "Automated Multi-Asset Watchlist Engine",
                 "product_id":       product_id,
@@ -3054,7 +3105,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                 "live_data_source": "Coinbase Advanced API",
                 "config": {
                     "trailing_percent":    TRAILING_PERCENT,
-                    "take_profit_percent": TAKE_PROFIT_PERCENT,
+                    "take_profit_percent": main_tp_pct,
                     "total_capital_usd":   TOTAL_CAPITAL_USD,
                 },
                 "entry": {
