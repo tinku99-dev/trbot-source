@@ -21,17 +21,20 @@ QUOTE_CURRENCY        = "USD"   # only trade X-USD pairs
 
 # ---------------------------------------------------------------------------
 # CAPITAL MANAGEMENT
-# CAPITAL_PER_TRADE_USD : fixed dollar size deployed per coin ($1000 default)
-# MAX_OPEN_POSITIONS    : max simultaneous positions (up to 10 coins)
-# TOTAL_CAPITAL_USD     : full budget = per-trade size x max positions
-# MAX_DAILY_LOSS_PER_COIN: if a coin's realized loss in a UTC day exceeds this,
-#                          it is blocked from new trades until the next UTC day.
+# CAPITAL_PER_TRADE_USD  : fixed dollar size deployed per coin
+# MAX_OPEN_POSITIONS     : max simultaneous positions
+# TOTAL_CAPITAL_USD      : full budget = per-trade size x max positions
+# MAX_DAILY_LOSS_PER_COIN: per-coin daily loss cap (blocks that coin for the day)
+# MAX_DAILY_LOSS_PCT     : portfolio-level daily loss cap as % of TOTAL_CAPITAL_USD
+#                          If total realized loss for the day exceeds this %,
+#                          NO new entries are opened for the rest of the UTC day.
 # ---------------------------------------------------------------------------
-CAPITAL_PER_TRADE_USD = float(os.environ.get("CAPITAL_PER_TRADE_USD", "1000"))  # $1000 per coin
-MAX_OPEN_POSITIONS    = int(os.environ.get("MAX_OPEN_POSITIONS",      "10"))    # up to 10 coins
-TOTAL_CAPITAL_USD     = float(os.environ.get(
-    "TOTAL_CAPITAL_USD", str(CAPITAL_PER_TRADE_USD * MAX_OPEN_POSITIONS)))      # $10,000 budget
-MAX_DAILY_LOSS_PER_COIN = float(os.environ.get("MAX_DAILY_LOSS_PER_COIN", "100"))  # per-coin/day
+CAPITAL_PER_TRADE_USD   = float(os.environ.get("CAPITAL_PER_TRADE_USD",   "1000"))  # $1000 per coin
+MAX_OPEN_POSITIONS      = int(os.environ.get("MAX_OPEN_POSITIONS",          "3"))    # 3 simultaneous positions
+TOTAL_CAPITAL_USD       = float(os.environ.get(
+    "TOTAL_CAPITAL_USD", str(CAPITAL_PER_TRADE_USD * MAX_OPEN_POSITIONS)))            # $3,000 budget
+MAX_DAILY_LOSS_PER_COIN = float(os.environ.get("MAX_DAILY_LOSS_PER_COIN",  "100"))  # per-coin/day
+MAX_DAILY_LOSS_PCT      = float(os.environ.get("MAX_DAILY_LOSS_PCT",        "5.0"))  # 5% portfolio stop
 
 # Minimum probability score (0-100) required before entering a position
 MIN_SIGNAL_SCORE    = float(os.environ.get("MIN_SIGNAL_SCORE",    "80"))
@@ -459,22 +462,42 @@ def load_daily_ledger() -> dict:
 
 
 def record_daily_pnl(ledger: dict, product_id: str, pnl_usd: float):
-    """Adds realized PnL for a coin and blocks it for the day if it breaches the loss cap."""
+    """Adds realized PnL for a coin and blocks it for the day if it breaches the per-coin cap."""
     realized = ledger.setdefault("realized", {})
     realized[product_id] = round(realized.get(product_id, 0.0) + pnl_usd, 4)
 
-    # Block the coin for the rest of the UTC day once daily loss exceeds the cap.
+    # Block the individual coin if it exceeds the per-coin daily loss cap.
     if realized[product_id] <= -abs(MAX_DAILY_LOSS_PER_COIN):
         blocked = ledger.setdefault("blocked", [])
         if product_id not in blocked:
             blocked.append(product_id)
-            print(f"  [Daily Stop] {product_id} hit ${realized[product_id]:+.2f} today "
+            print(f"  [Coin Stop] {product_id} hit ${realized[product_id]:+.2f} today "
                   f"(cap -${MAX_DAILY_LOSS_PER_COIN:.0f}). Blocked until next UTC day.")
+
+    # Check portfolio-wide daily loss cap.
+    total_loss = sum(v for v in realized.values() if v < 0)
+    portfolio_cap = -(MAX_DAILY_LOSS_PCT / 100.0) * TOTAL_CAPITAL_USD
+    if total_loss <= portfolio_cap and not ledger.get("portfolio_stopped"):
+        ledger["portfolio_stopped"] = True
+        print(f"  [Portfolio Stop] Daily loss ${total_loss:+.2f} exceeded "
+              f"{MAX_DAILY_LOSS_PCT:.0f}% cap (${portfolio_cap:+.2f}). "
+              f"No new trades until next UTC day.")
+        send_discord_alert(
+            f"🛑 **Portfolio Daily Stop Hit**\n"
+            f"Total realized loss today: ${total_loss:+.2f}\n"
+            f"Limit: {MAX_DAILY_LOSS_PCT:.0f}% of ${TOTAL_CAPITAL_USD:,.0f} = ${portfolio_cap:+.2f}\n"
+            f"No new entries until next UTC day ({_today_str()})."
+        )
 
 
 def is_coin_blocked_today(ledger: dict, product_id: str) -> bool:
     """True if the coin has breached its daily loss cap and is paused for the day."""
     return product_id in ledger.get("blocked", [])
+
+
+def is_portfolio_stopped_today(ledger: dict) -> bool:
+    """True if the portfolio-wide daily loss cap has been hit — no new entries."""
+    return bool(ledger.get("portfolio_stopped", False))
 
 # ---------------------------------------------------------------------------
 # COINBASE CLIENT
@@ -1968,6 +1991,13 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
 
     shadow_candidates = []
     budget_skip_reason = ""
+
+    # Portfolio daily stop: if total loss today >= MAX_DAILY_LOSS_PCT, skip all entries.
+    if is_portfolio_stopped_today(daily_ledger):
+        total_loss = sum(v for v in daily_ledger.get("realized", {}).values() if v < 0)
+        print(f"  [Portfolio Stop] Skipping all entries — daily loss ${total_loss:+.2f} "
+              f"hit {MAX_DAILY_LOSS_PCT:.0f}% cap. Trading resumes tomorrow.")
+        return
 
     for prod in by_score:
         product_id = prod["product_id"]
