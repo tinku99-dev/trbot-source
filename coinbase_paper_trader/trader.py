@@ -343,11 +343,15 @@ def _load_from_blob_with_metadata(filepath: str):
         from azure.storage.blob import BlobServiceClient
         client = BlobServiceClient.from_connection_string(_BLOB_CONN_STR)
         blob = client.get_blob_client(container=_BLOB_CONTAINER, blob=_blob_name(filepath))
-        properties = blob.get_blob_properties()
         raw = blob.download_blob().readall().decode("utf-8")
         data = json.loads(raw)
-        return data, properties.last_modified
-    except Exception:
+        try:
+            properties = blob.get_blob_properties()
+            return data, properties.last_modified
+        except Exception:
+            return data, None
+    except Exception as exc:
+        print(f"[Blob] load failed for {os.path.basename(filepath)}: {exc}")
         return None, None
 
 def _backup_existing_blob(container, blob, filepath: str, new_payload: str) -> None:
