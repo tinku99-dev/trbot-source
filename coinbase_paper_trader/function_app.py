@@ -1014,16 +1014,11 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
     try:
         import trader
 
-        active_positions = load_json_state(
-            f"trader-state/{trader.PORTFOLIO_FILE}",
-            trader._data_path(trader.PORTFOLIO_FILE),
-            {},
-        )
-        history = load_json_state(
-            f"trader-state/{trader.HISTORY_FILE}",
-            trader._data_path(trader.HISTORY_FILE),
-            [],
-        )
+        # Use the same blob-primary state loader as the trading cycle. Keeping a
+        # separate summary-only loader can silently fall back to an empty local
+        # file after clean deploys, while the real portfolio blob still has data.
+        active_positions = trader.load_json_file(trader.PORTFOLIO_FILE)
+        history = trader.load_json_file(trader.HISTORY_FILE)
         if not isinstance(active_positions, dict):
             active_positions = {}
         if not isinstance(history, list):
