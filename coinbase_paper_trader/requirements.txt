@@ -8,3 +8,4 @@ numpy
 requests
 azure-storage-blob
 coinbase-advanced-py
+coinbase-advanced-py
