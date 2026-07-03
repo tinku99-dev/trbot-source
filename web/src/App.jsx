@@ -165,9 +165,14 @@ function PaperTradingDashboard() {
     window.localStorage.setItem('paper_close_function_key', nextKey)
   }
 
-  async function closePosition(productId = '') {
+  async function closePosition(productId) {
     if (!PAPER_CLOSE_URL) {
       setCloseStatus('Close endpoint is not configured for this build.')
+      return
+    }
+
+    if (!productId) {
+      setCloseStatus('Choose an active coin row to close.')
       return
     }
 
@@ -177,17 +182,13 @@ function PaperTradingDashboard() {
       return
     }
 
-    const target = productId || 'ALL'
+    const target = productId
     const url = new URL(PAPER_CLOSE_URL, window.location.origin)
-    if (productId) {
-      url.searchParams.set('productId', productId)
-    } else {
-      url.searchParams.set('all', 'true')
-    }
+    url.searchParams.set('productId', productId)
 
     try {
       setClosingId(target)
-      setCloseStatus(productId ? `Closing ${productId}...` : 'Closing all open positions...')
+      setCloseStatus(`Closing ${productId}...`)
       const response = await fetch(url.toString(), {
         method: 'POST',
         headers: { 'x-functions-key': key },
@@ -236,13 +237,10 @@ function PaperTradingDashboard() {
           type="password"
           value={closeKey}
           onChange={(event) => saveCloseKey(event.target.value)}
-          placeholder="Function key for closing paper positions"
+          placeholder="Function key for closing an active coin"
           aria-label="Function key for closing paper positions"
           autoComplete="off"
         />
-        <button type="button" onClick={() => closePosition()} disabled={!openPositions.length || closingId === 'ALL'}>
-          {closingId === 'ALL' ? 'Closing' : 'Close All'}
-        </button>
         {closeStatus && <span className={closeStatus.includes('closed') ? 'positive' : ''}>{closeStatus}</span>}
       </section>
 
@@ -301,7 +299,7 @@ function PaperTradingDashboard() {
                             type="button"
                             className="table-action"
                             onClick={() => closePosition(position.productId)}
-                            disabled={closingId === position.productId || closingId === 'ALL'}
+                            disabled={closingId === position.productId}
                           >
                             {closingId === position.productId ? 'Closing' : 'Close'}
                           </button>

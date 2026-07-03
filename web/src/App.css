@@ -48,7 +48,7 @@
 
 .paper-controls {
   display: grid;
-  grid-template-columns: minmax(240px, 420px) auto minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 420px) minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   margin-bottom: 18px;
