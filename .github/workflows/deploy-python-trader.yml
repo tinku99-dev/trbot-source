@@ -8,13 +8,14 @@ on:
       - ".github/workflows/deploy-python-trader.yml"
   workflow_dispatch:
 
-# Required GitHub environment/repo values for Azure OIDC login:
-#   AZURE_CLIENT_ID        → secret or variable
-#   AZURE_TENANT_ID        → secret or variable
-#   AZURE_SUBSCRIPTION_ID  → secret or variable
+# Azure OIDC app registration: github-trbot-source-python-trader-deploy
+# Federated credential subject: repo:tinku99-dev/trbot-source:environment:production
 
 env:
   AZURE_FUNCTIONAPP_NAME: func-coinbase-trader-v2
+  AZURE_CLIENT_ID: 9b765859-a84a-4b9f-8bc8-46539131026b
+  AZURE_TENANT_ID: da34c113-8b4f-453a-b7d8-92b6087438fb
+  AZURE_SUBSCRIPTION_ID: 5f66945a-ed88-4f91-87bd-f3074c0d752c
   PYTHON_VERSION: "3.11"
 
 jobs:
@@ -42,9 +43,9 @@ jobs:
       - name: Azure login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID || vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID || vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID || vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
