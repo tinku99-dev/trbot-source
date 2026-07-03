@@ -67,7 +67,7 @@ CANDLE_VOL_RATIO_MIN    = float(os.environ.get("CANDLE_VOL_RATIO_MIN", "1.5"))
 CANDLE_COMPRESSION_TIGHT= float(os.environ.get("CANDLE_COMPRESSION_TIGHT", "2.0"))
 CANDLE_MAX_OVEREXTENSION= float(os.environ.get("CANDLE_MAX_OVEREXTENSION", "2.0"))
 CANDLE_SCAN_LIMIT       = int(os.environ.get("CANDLE_SCAN_LIMIT", "30"))      # top-N by volume
-RECENT_TRIGGER_CANDLES  = int(os.environ.get("RECENT_TRIGGER_CANDLES", "3"))  # don't miss moves between timer runs
+RECENT_TRIGGER_CANDLES  = int(os.environ.get("RECENT_TRIGGER_CANDLES", "6"))  # don't miss moves between timer runs (30-min window at 5m candles)
 COINBASE_PUBLIC_BASE    = "https://api.exchange.coinbase.com"
 
 # Opening Range Breakout (ORB): for always-open crypto markets this uses a
@@ -778,6 +778,9 @@ def detect_breakout_pattern(product_id: str, candles: list[list] | None = None) 
         "candle_move_pct": round(move_pct, 3),
         "overextension_pct": round(overextension_pct, 3),
         "base_high": base_high,
+        # FVG anchors: the open is the FVG low (stop anchor), close is FVG high
+        "trigger_candle_open": l_open,
+        "trigger_candle_close": l_close,
     }
     return {"pattern_score": round(min(score, 100.0), 1), "features": features}
 
@@ -1340,8 +1343,12 @@ def liquidity_filter_result(product_data: dict) -> dict:
         dollar_volume_24h = price * volume_24h
 
     features = product_data.get("pre_breakout_features", {}) or {}
+    # For low-price tokens a single 5m candle may be tiny — use the 6-candle (30m)
+    # rolling window dollar volume stored during enrichment if available, falling back
+    # to the single-candle figure. This avoids filtering out valid small-cap breakouts.
     breakout_dollar_volume = max(
         float(features.get("breakout_candle_dollar_volume", 0.0) or 0.0),
+        float(features.get("breakout_window_dollar_volume", 0.0) or 0.0),
         float((product_data.get("orb_features", {}) or {}).get("orb_breakout_dollar_volume", 0.0) or 0.0),
         float((product_data.get("bollinger_features", {}) or {}).get("bollinger_signal_dollar_volume", 0.0) or 0.0),
     )
@@ -1422,12 +1429,20 @@ def detect_bearish_reversal(product_id: str, candles: list[list] | None = None) 
     if move_pct <= -abs(BEARISH_DROP_PCT) and vol_ratio >= BEARISH_VOL_RATIO:
         return {"bearish": True, "reason": "BEARISH_VOLUME_CANDLE"}
 
-    # 3) Lower highs across the recent window (fading momentum)
+    # 3) Lower highs with CONFIRMED structural breakdown (not just a normal pullback).
+    # Requires: lower highs in the second half AND a meaningful drop from the recent
+    # swing high (>=BEARISH_DROP_PCT%) AND volume confirmation. This prevents firing on
+    # routine consolidation candles in an uptrend — true invalidation needs all three.
     half = len(base_highs) // 2
     if half >= 2:
         first_half_high = max(base_highs[:half])
         second_half_high = max(base_highs[half:])
-        if second_half_high < first_half_high and l_close < l_open:
+        max_recent_high = max(base_highs)
+        drop_from_high_pct = ((max_recent_high - l_close) / max_recent_high * 100) if max_recent_high > 0 else 0.0
+        if (second_half_high < first_half_high
+                and drop_from_high_pct >= abs(BEARISH_DROP_PCT)
+                and vol_ratio >= BEARISH_VOL_RATIO
+                and l_close < l_open):
             return {"bearish": True, "reason": "LOWER_HIGHS_FADING"}
 
     return {"bearish": False, "reason": ""}
@@ -1991,6 +2006,19 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             wedge = detect_wedge_breakout(prod["product_id"])
             prod["wedge_features"] = wedge["features"]
             prod["wedge_score"] = wedge["wedge_score"]
+            # Compute 30-min rolling window dollar volume (best 6-candle sum).
+            # Low-price tokens have tiny single-candle $ values but healthy 30m flow.
+            if len(candles) >= 6:
+                last_price = float(candles[-1][4] or 0.0)
+                if last_price > 0:
+                    best_window_usd = 0.0
+                    for _wi in range(len(candles) - 6, len(candles)):
+                        window_usd = sum(float(candles[_j][5] or 0.0) * float(candles[_j][4] or 0.0)
+                                        for _j in range(max(0, _wi - 5), _wi + 1))
+                        best_window_usd = max(best_window_usd, window_usd)
+                    if result["features"]:
+                        result["features"]["breakout_window_dollar_volume"] = round(best_window_usd, 2)
+                        prod["pre_breakout_features"] = result["features"]
         else:
             features = _compute_pre_breakout_features(prod, market_state)
             prod["pre_breakout_features"] = features
@@ -2088,7 +2116,22 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 continue
 
             crypto_qty         = position_size / price
-            initial_stop       = price * (1 - TRAILING_PERCENT / 100)
+            # FVG-aware initial stop: anchor to the breakout candle's OPEN (the FVG low).
+            # If price returns below the open of the breakout candle the Fair Value Gap
+            # is filled and the trade is structurally invalidated — a far tighter and more
+            # meaningful stop than a flat %-from-close. Falls back to the flat trailing %
+            # when no candle-open data is available (e.g. ORB/Bollinger entries).
+            _sig_feats      = signal.get("features", {}) or {}
+            _fvg_candle_open = float(_sig_feats.get("trigger_candle_open", 0.0) or 0.0)
+            if _fvg_candle_open > 0 and _fvg_candle_open < price:
+                # 0.3% buffer below the FVG low so normal noise doesn't stop us out
+                fvg_stop        = _fvg_candle_open * (1 - 0.003)
+                flat_stop       = price * (1 - TRAILING_PERCENT / 100)
+                initial_stop    = max(fvg_stop, flat_stop)  # never worse than the flat stop
+                _stop_method    = f"FVG (candle open ${_fvg_candle_open:,.6g})"
+            else:
+                initial_stop    = price * (1 - TRAILING_PERCENT / 100)
+                _stop_method    = f"flat {TRAILING_PERCENT:.1f}%"
             take_profit_target = price * (1 + TAKE_PROFIT_PERCENT / 100)
             mode_label         = "LIVE BUY" if LIVE_ORDERS_ACTIVE else "PAPER BUY"
 
@@ -2149,6 +2192,8 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             active_positions[product_id]["dollar_volume_24h"] = liquidity.get("dollar_volume_24h", 0.0)
             active_positions[product_id]["breakout_dollar_volume"] = liquidity.get("breakout_dollar_volume", 0.0)
             active_positions[product_id]["obv"] = obv.get("metrics", {})
+            active_positions[product_id]["initial_stop_method"] = _stop_method
+            active_positions[product_id]["fvg_candle_open"] = _fvg_candle_open
 
             confirming_strategies = signal.get("confirming_strategies", [signal["strategy"]])
             confidence_label = signal.get("confidence_level", "SINGLE")
@@ -2165,7 +2210,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 f"   Strategy: {signal['strategy'].replace('_', ' ')}\n"
                 f"   Confirmed by: {confirming_str}\n"
                 f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  (all /100)\n"
-                f"📈 TP: ${take_profit_target:,.6g} (+{TAKE_PROFIT_PERCENT:.0f}%)  |  Stop: ${initial_stop:,.6g} (-{TRAILING_PERCENT:.1f}%)\n"
+                f"📈 TP: ${take_profit_target:,.6g} (+{TAKE_PROFIT_PERCENT:.0f}%)  |  Stop: ${initial_stop:,.6g} [{_stop_method}]\n"
                 f"💧 24h Vol: ${liquidity.get('dollar_volume_24h', 0.0):,.0f}  |  OBV: {obv.get('metrics', {}).get('obv_pressure_pct', 0.0):+.1f}%\n"
                 f"🏦 Budget used: ${_capital_deployed(active_positions):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions)}/{MAX_OPEN_POSITIONS} slots)"
             )
@@ -2228,6 +2273,55 @@ def compute_trailing_stop_pct(product_id: str, entry_price: float, current_price
     return round(trail_pct, 3), round(profit_pct, 3)
 
 
+def _migrate_legacy_position(pos: dict) -> bool:
+    """Back-fills fields that were added after a position was first persisted.
+    Returns True if any field was updated (signals the caller to save the file)."""
+    changed = False
+
+    # original_allocated_usd tracks full size before moon-bag partial sells.
+    if "original_allocated_usd" not in pos:
+        pos["original_allocated_usd"] = float(pos.get("allocated_usd", CAPITAL_PER_TRADE_USD) or CAPITAL_PER_TRADE_USD)
+        changed = True
+
+    # Moon-bag / take-profit percentages: back-fill from current env so the
+    # manage loop doesn't fall back to hard-coded 100% sell (full exit).
+    if "take_profit_sell_percent" not in pos:
+        pos["take_profit_sell_percent"] = TAKE_PROFIT_SELL_PERCENT
+        changed = True
+    if "moon_bag_percent" not in pos:
+        pos["moon_bag_percent"] = MOON_BAG_PERCENT
+        changed = True
+
+    # If the stored TP boundary reflects a LOWER TP% than the current env var,
+    # upgrade it so old positions benefit from the corrected setting.
+    entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+    current_tp = float(pos.get("take_profit_boundary", 0.0) or 0.0)
+    if entry_price > 0 and current_tp > 0 and not pos.get("partial_take_profit_taken"):
+        stored_tp_pct = (current_tp - entry_price) / entry_price * 100
+        if stored_tp_pct < TAKE_PROFIT_PERCENT - 0.5:   # allow 0.5% tolerance
+            pos["take_profit_boundary"] = round(entry_price * (1 + TAKE_PROFIT_PERCENT / 100), 8)
+            print(
+                f"  [MIGRATE] {pos.get('product_id','?')} TP upgraded from "
+                f"+{stored_tp_pct:.1f}% → +{TAKE_PROFIT_PERCENT:.1f}% "
+                f"(${current_tp:,.6g} → ${pos['take_profit_boundary']:,.6g})"
+            )
+            changed = True
+
+    # entry_strategy: infer from available features when missing.
+    if not pos.get("entry_strategy"):
+        if pos.get("pre_breakout_features"):
+            pos["entry_strategy"] = "candle_breakout"
+        elif pos.get("orb_features"):
+            pos["entry_strategy"] = "orb"
+        elif pos.get("bollinger_features"):
+            pos["entry_strategy"] = "bollinger_reversal"
+        else:
+            pos["entry_strategy"] = "breakout"
+        changed = True
+
+    return changed
+
+
 def manage_active_positions(client, active_positions: dict, live_prices: dict, daily_ledger: dict):
     """Updates trailing stops and closes positions on take-profit, trailing stop,
     or a confirmed bearish reversal. Records realized PnL into the daily ledger."""
@@ -2240,6 +2334,10 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
         current_price = live_prices.get(product_id, 0.0)
         if current_price <= 0:
             continue
+
+        # Back-fill any fields that were added after this position was persisted.
+        if _migrate_legacy_position(pos):
+            changed = True
 
         # Ratchet trailing stop upward. The trail width widens as unrealized
         # profit grows (tiers) and adapts to volatility (ATR), so proven runners

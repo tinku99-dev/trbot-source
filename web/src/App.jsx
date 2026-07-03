@@ -27,6 +27,24 @@ function formatCurrency(value) {
   return currency.format(Number(value || 0))
 }
 
+/**
+ * Smart price formatter: 5 decimal places for sub-$1 crypto, 4 for $1-$100,
+ * 2 for large prices. Prevents coins like FARTCOIN ($0.17500) and ALLO
+ * ($0.37090) from losing precision.
+ */
+function formatPrice(value) {
+  const num = Number(value || 0)
+  if (num === 0) return '$0.00'
+  const abs = Math.abs(num)
+  const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : 5
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(num)
+}
+
 function formatPercent(value) {
   return `${percent.format(Number(value || 0))}%`
 }
@@ -137,11 +155,11 @@ function PaperTradingDashboard() {
   }, [])
 
   const summary = data?.summary || {}
-  const openPositions = data?.open_positions || []
+  const openPositions = data?.openPositions || []
   // Show the complete daily history, newest first. Sort explicitly so the view
   // is independent of the API's ordering.
   const dailyRows = [...(data?.daily || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
-  const recentTrades = data?.recent_closed_trades || []
+  const recentTrades = data?.recentClosedTrades || []
   const isLoading = status === 'loading'
 
   return (
@@ -149,7 +167,7 @@ function PaperTradingDashboard() {
       <div className="utility-row">
         <div className="status-panel">
           <span className={`status-dot ${status}`}></span>
-          <span>{status === 'ready' ? `Updated ${formatDateTime(data?.generated_at_utc)}` : status.replace('-', ' ')}</span>
+          <span>{status === 'ready' ? `Updated ${formatDateTime(data?.generatedAtUtc)}` : status.replace('-', ' ')}</span>
           <button type="button" onClick={loadSummary} disabled={isLoading}>
             {isLoading ? 'Refreshing' : 'Refresh'}
           </button>
@@ -159,12 +177,14 @@ function PaperTradingDashboard() {
       {error && <div className="alert">{error}</div>}
 
       <section className="scoreboard" aria-label="Profit and loss summary">
-        <Metric label="Total P/L" value={formatCurrency(summary.total_pnl_usd)} tone={pnlClass(summary.total_pnl_usd)} />
-        <Metric label="Realized" value={formatCurrency(summary.realized_pnl_usd)} tone={pnlClass(summary.realized_pnl_usd)} />
-        <Metric label="Unrealized" value={formatCurrency(summary.unrealized_pnl_usd)} tone={pnlClass(summary.unrealized_pnl_usd)} />
-        <Metric label="Allocated" value={formatCurrency(summary.allocated_usd)} />
-        <Metric label="Open" value={summary.open_positions ?? 0} />
-        <Metric label="Win Rate" value={formatPercent(summary.win_rate_pct)} />
+        <Metric label="Total P/L" value={formatCurrency(summary.totalPnlUsd)} tone={pnlClass(summary.totalPnlUsd)} />
+        <Metric label="Realized" value={formatCurrency(summary.realizedPnlUsd)} tone={pnlClass(summary.realizedPnlUsd)} />
+        <Metric label="Unrealized" value={formatCurrency(summary.unrealizedPnlUsd)} tone={pnlClass(summary.unrealizedPnlUsd)} />
+        <Metric label="Total Invested" value={formatCurrency(summary.totalInvestedUsd)} />
+        <Metric label="Allocated" value={formatCurrency(summary.allocatedUsd)} />
+        <Metric label="Open" value={summary.openPositions ?? 0} />
+        <Metric label="Closed" value={summary.closedTrades ?? 0} />
+        <Metric label="Win Rate" value={formatPercent(summary.winRatePct)} />
       </section>
 
       <section className="grid-two">
@@ -175,28 +195,37 @@ function PaperTradingDashboard() {
                 <thead>
                   <tr>
                     <th>Coin</th>
-                    <th>Strategy</th>
                     <th>Entry</th>
                     <th>Mark</th>
                     <th>P/L</th>
-                    <th>Trail</th>
+                    <th>Invested</th>
+                    <th>Trail Stop</th>
                     <th>Take Profit</th>
+                    <th>Held</th>
+                    <th>Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {openPositions.map((position) => (
-                    <tr key={position.product_id}>
-                      <td className="strong">{position.product_id}</td>
-                      <td>{position.strategy || 'Scanner'}</td>
-                      <td>{formatCurrency(position.entry_price)}</td>
-                      <td>{formatCurrency(position.mark_price)}</td>
-                      <td className={pnlClass(position.unrealized_pnl_usd)}>
-                        {formatCurrency(position.unrealized_pnl_usd)} <small>{formatPercent(position.unrealized_pnl_pct)}</small>
-                      </td>
-                      <td>{formatCurrency(position.current_trailing_stop)}</td>
-                      <td>{formatCurrency(position.take_profit_boundary)}</td>
-                    </tr>
-                  ))}
+                  {openPositions.map((position) => {
+                    const entryMs = position.entryTimestampUtc ? new Date(position.entryTimestampUtc).getTime() : 0
+                    const heldH = entryMs ? Math.floor((Date.now() - entryMs) / 3600000) : null
+                    const heldLabel = heldH !== null ? (heldH >= 24 ? `${Math.floor(heldH/24)}d ${heldH%24}h` : `${heldH}h`) : '—'
+                    return (
+                      <tr key={position.productId}>
+                        <td className="strong">{position.productId}</td>
+                        <td>{formatPrice(position.entryPriceUsd)}</td>
+                        <td>{formatPrice(position.markPriceUsd)}</td>
+                        <td className={pnlClass(position.unrealizedPnlUsd)}>
+                          {formatCurrency(position.unrealizedPnlUsd)} <small>{formatPercent(position.unrealizedPnlPct)}</small>
+                        </td>
+                        <td>{formatCurrency(position.originalAllocatedUsd || position.allocatedUsd)}</td>
+                        <td>{formatPrice(position.currentTrailingStop)}</td>
+                        <td>{formatPrice(position.takeProfitBoundary)}</td>
+                        <td>{heldLabel}</td>
+                        <td>{position.partialTakeProfitTaken ? <span className="badge positive">🌙 Moon Bag</span> : <span className="badge neutral">Running</span>}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -211,8 +240,8 @@ function PaperTradingDashboard() {
               {dailyRows.map((day) => (
                 <div className="daily-row" key={day.date}>
                   <span>{day.date}</span>
-                  <span>{(day.closed_trades || 0) + (day.partial_takes || 0)} trades</span>
-                  <strong className={pnlClass(day.realized_pnl_usd)}>{formatCurrency(day.realized_pnl_usd)}</strong>
+                  <span>{(day.closedTrades || 0)} trades</span>
+                  <strong className={pnlClass(day.realizedPnlUsd)}>{formatCurrency(day.realizedPnlUsd)}</strong>
                 </div>
               ))}
             </div>
@@ -238,14 +267,14 @@ function PaperTradingDashboard() {
               </thead>
               <tbody>
                 {recentTrades.map((trade, index) => {
-                  const pnl = trade.performance?.pnl_usd
+                  const pnl = trade.pnlUsd
                   return (
-                    <tr key={`${trade.product_id}-${trade.exit?.timestamp || index}`}>
-                      <td className="strong">{trade.product_id}</td>
-                      <td>{formatDateTime(trade.exit?.timestamp)}</td>
-                      <td>{trade.exit?.reason || 'Closed'}</td>
-                      <td>{formatCurrency(trade.entry?.price)}</td>
-                      <td>{formatCurrency(trade.exit?.price)}</td>
+                    <tr key={`${trade.productId}-${trade.exitTimestampUtc || index}`}>
+                      <td className="strong">{trade.productId}</td>
+                      <td>{formatDateTime(trade.exitTimestampUtc)}</td>
+                      <td>{trade.exitReason || 'Closed'}</td>
+                      <td>{formatPrice(trade.entryPriceUsd)}</td>
+                      <td>{formatPrice(trade.exitPriceUsd)}</td>
                       <td className={pnlClass(pnl)}>{formatCurrency(pnl)}</td>
                     </tr>
                   )
@@ -313,7 +342,7 @@ function TickerAnalyzer({ apiKey, functionUrl, onOpenSettings }) {
               <p className="eyebrow">{analysis.assetClass}</p>
               <h2>{analysis.symbol}</h2>
             </div>
-            <strong>{formatCurrency(analysis.price)}</strong>
+            <strong>{formatPrice(analysis.price)}</strong>
           </section>
 
           <section className="cards-three">
@@ -446,20 +475,20 @@ function PositionsTable({ rows }) {
         </thead>
         <tbody>
           {rows.map((pos, i) => {
-            const pnlClass = pos.unrealized_pnl_pct > 0 ? 'positive' : pos.unrealized_pnl_pct < 0 ? 'negative' : ''
+            const posPnlClass = pos.unrealized_pnl_pct > 0 ? 'positive' : pos.unrealized_pnl_pct < 0 ? 'negative' : ''
             return (
               <tr key={`${pos.symbol}-${i}`}>
                 <td className="strong">{pos.symbol}</td>
-                <td>{formatCurrency(pos.entry_price)}</td>
-                <td>{pos.current_price > 0 ? formatCurrency(pos.current_price) : '—'}</td>
-                <td className={pnlClass}>
+                <td>{formatPrice(pos.entry_price)}</td>
+                <td>{pos.current_price > 0 ? formatPrice(pos.current_price) : '—'}</td>
+                <td className={posPnlClass}>
                   {pos.current_price > 0
                     ? `${pos.unrealized_pnl_pct > 0 ? '+' : ''}${pos.unrealized_pnl_pct.toFixed(2)}% ($${pos.unrealized_pnl_usd > 0 ? '+' : ''}${pos.unrealized_pnl_usd.toFixed(2)})`
                     : '—'}
                 </td>
                 <td>${(pos.allocated_usd || 0).toFixed(2)}</td>
                 <td>{pos.trail_pct.toFixed(1)}%</td>
-                <td>{pos.current_stop > 0 ? formatCurrency(pos.current_stop) : '—'}</td>
+                <td>{pos.current_stop > 0 ? formatPrice(pos.current_stop) : '—'}</td>
                 <td>{pos.partial_taken ? <span className="badge positive">Done</span> : '—'}</td>
               </tr>
             )
@@ -503,9 +532,9 @@ function ScalpTable({ rows, showReason }) {
                 <td>{formatNumber(row.score, 1)}{row.consensus_bonus > 0 ? ` (+${formatNumber(row.consensus_bonus, 0)})` : ''}</td>
                 <td>{row.confidence_level}</td>
                 <td>{String(row.strategy || '').replace(/_/g, ' ')}</td>
-                <td>{formatCurrency(row.price)}</td>
-                <td>{formatCurrency(row.stop_loss)}</td>
-                <td>{formatCurrency(row.target1)} / {formatCurrency(row.target2)}</td>
+                <td>{formatPrice(row.price)}</td>
+                <td>{formatPrice(row.stop_loss)}</td>
+                <td>{formatPrice(row.target1)} / {formatPrice(row.target2)}</td>
                 {showReason ? (
                   <td>{reasonShort || 'Filtered'}</td>
                 ) : (
@@ -612,11 +641,11 @@ function SummaryTable({ rows, mode }) {
               <td className="strong">{row.symbol}</td>
               {mode !== 'movers' && <td>{formatNumber(row.score, 1)}</td>}
               {mode !== 'movers' && <td>{row.tierLabel || row.tier || row.conviction || 'Candidate'}</td>}
-              {mode === 'movers' && <td>{formatCurrency(row.price)}</td>}
+              {mode === 'movers' && <td>{formatPrice(row.price)}</td>}
               {mode === 'movers' && <td className={pnlClass(row.changePct)}>{formatPercent(row.changePct)}</td>}
-              {mode !== 'movers' && <td>{formatCurrency(row.buyRangeLow)} - {formatCurrency(row.buyRangeHigh)}</td>}
-              {mode !== 'movers' && <td>{formatCurrency(row.stopLoss)}</td>}
-              {mode !== 'movers' && <td>{formatCurrency(row.target1)} / {formatCurrency(row.target2)}</td>}
+              {mode !== 'movers' && <td>{formatPrice(row.buyRangeLow)} – {formatPrice(row.buyRangeHigh)}</td>}
+              {mode !== 'movers' && <td>{formatPrice(row.stopLoss)}</td>}
+              {mode !== 'movers' && <td>{formatPrice(row.target1)} / {formatPrice(row.target2)}</td>}
               {mode === 'rejected' && <td>{row.reason || 'Filtered'}</td>}
               {mode !== 'rejected' && mode !== 'movers' && <td>{[...(row.signals || []), ...(row.patterns || [])].slice(0, 3).join(', ') || 'Setup'}</td>}
             </tr>
@@ -640,8 +669,8 @@ function IndicatorPanel({ indicators }) {
             <span>RSI {formatNumber(item.momentum?.rsi14, 1)}</span>
             <span>ADX {formatNumber(item.trend?.adx14, 1)}</span>
             <span>Conviction {formatNumber(item.conviction, 1)}</span>
-            <span>Support {formatCurrency(item.levels?.support)}</span>
-            <span>Resistance {formatCurrency(item.levels?.resistance)}</span>
+            <span>Support {formatPrice(item.levels?.support)}</span>
+            <span>Resistance {formatPrice(item.levels?.resistance)}</span>
           </article>
         ))}
       </div>
@@ -662,10 +691,10 @@ function StyleCard({ title, rec }) {
       </div>
       {rec.levels && (
         <div className="level-grid">
-          <Metric label="Entry" value={formatCurrency(rec.levels.entry)} />
-          <Metric label="Stop" value={formatCurrency(rec.levels.stopLoss)} tone="negative" />
-          <Metric label="Target 1" value={formatCurrency(rec.levels.target1)} tone="positive" />
-          <Metric label="Target 2" value={formatCurrency(rec.levels.target2)} tone="positive" />
+          <Metric label="Entry" value={formatPrice(rec.levels.entry)} />
+          <Metric label="Stop" value={formatPrice(rec.levels.stopLoss)} tone="negative" />
+          <Metric label="Target 1" value={formatPrice(rec.levels.target1)} tone="positive" />
+          <Metric label="Target 2" value={formatPrice(rec.levels.target2)} tone="positive" />
           <Metric label="Risk" value={formatPercent(rec.levels.riskPct)} />
           <Metric label="R:R" value={`${formatNumber(rec.levels.rewardRisk, 1)}:1`} />
         </div>

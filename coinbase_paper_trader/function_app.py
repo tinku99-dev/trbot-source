@@ -1044,83 +1044,123 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
 
         open_positions = []
         unrealized_total = 0.0
+        total_invested_usd = 0.0
         for product_id, position in active_positions.items():
             entry_price = float(position.get("entry_price", 0) or 0)
             mark_price = float(live_prices.get(product_id, entry_price) or entry_price)
             allocated = float(position.get("allocated_usd", trader.CAPITAL_PER_TRADE_USD) or 0)
+            # original_allocated_usd tracks the full position size before any
+            # partial take-profit reduced allocated_usd (moon bag).
+            original_allocated = float(
+                position.get("original_allocated_usd", allocated) or allocated
+            )
+            total_invested_usd += original_allocated
             quantity = float(position.get("simulated_qty", 0) or 0)
             pnl = (quantity * mark_price) - allocated
             pnl_pct = (pnl / allocated * 100) if allocated else 0.0
             unrealized_total += pnl
             open_positions.append({
-                "product_id": product_id,
+                # camelCase keys so the React dashboard can consume this endpoint
+                # directly without a field-name translation layer.
+                "productId": product_id,
                 "mode": position.get("mode", "paper"),
-                "entry_timestamp": position.get("entry_timestamp"),
-                "entry_price": entry_price,
-                "mark_price": mark_price,
-                "allocated_usd": allocated,
+                "entryTimestampUtc": position.get("entry_timestamp"),
+                "entryPriceUsd": entry_price,
+                "markPriceUsd": mark_price,
+                "allocatedUsd": allocated,
+                "originalAllocatedUsd": original_allocated,
                 "quantity": quantity,
-                "current_trailing_stop": float(position.get("current_trailing_stop", 0) or 0),
-                "current_trail_pct": float(position.get("current_trail_pct", 0) or 0),
-                "take_profit_boundary": float(position.get("take_profit_boundary", 0) or 0),
+                "currentTrailingStop": float(position.get("current_trailing_stop", 0) or 0),
+                "currentTrailPct": float(position.get("current_trail_pct", 0) or 0),
+                "takeProfitBoundary": float(position.get("take_profit_boundary", 0) or 0),
                 "strategy": position.get("entry_strategy", ""),
-                "strategy_score": float(position.get("entry_strategy_score", 0) or 0),
-                "partial_take_profit_taken": bool(position.get("partial_take_profit_taken", False)),
-                "unrealized_pnl_usd": round(pnl, 2),
-                "unrealized_pnl_pct": round(pnl_pct, 2),
+                "strategyScore": float(position.get("entry_strategy_score", 0) or 0),
+                "partialTakeProfitTaken": bool(position.get("partial_take_profit_taken", False)),
+                "unrealizedPnlUsd": round(pnl, 2),
+                "unrealizedPnlPct": round(pnl_pct, 2),
             })
+
+        # Also add total invested from closed history trades that are fully exited
+        # (PARTIAL + CLOSED together reconstruct the original position size).
+        history_allocated = sum(
+            float((t.get("entry") or {}).get("allocated_capital_usd") or 0)
+            for t in realized_events
+        )
+        total_invested_usd += history_allocated
 
         # Daily breakdown across ALL realized events (partial + full), so every
         # trading day with any realized profit/loss shows up.
         daily = {}
         for trade in realized_events:
-            exit_timestamp = trade.get("exit", {}).get("timestamp", "")
+            exit_timestamp = (trade.get("exit") or {}).get("timestamp", "")
             day = exit_timestamp[:10] if exit_timestamp else "unknown"
-            status = trade.get("performance", {}).get("status")
+            status = (trade.get("performance") or {}).get("status")
             bucket = daily.setdefault(day, {"closed_trades": 0, "partial_takes": 0, "realized_pnl_usd": 0.0})
             if status == "CLOSED":
                 bucket["closed_trades"] += 1
             else:
                 bucket["partial_takes"] += 1
-            bucket["realized_pnl_usd"] += float(trade.get("performance", {}).get("pnl_usd", 0) or 0)
+            bucket["realized_pnl_usd"] += float((trade.get("performance") or {}).get("pnl_usd", 0) or 0)
 
         daily_rows = [
             {
                 "date": day,
-                "closed_trades": values["closed_trades"],
-                "partial_takes": values["partial_takes"],
-                "realized_pnl_usd": round(values["realized_pnl_usd"], 2),
+                "closedTrades": values["closed_trades"],
+                "partialTakes": values["partial_takes"],
+                "realizedPnlUsd": round(values["realized_pnl_usd"], 2),
             }
             for day, values in sorted(daily.items(), reverse=True)
         ]
 
-        # Full realized history (partial + closed), newest first. Cap high enough
-        # to show the complete history rather than only the latest handful.
+        # Flatten each realized-event record into a clean camelCase dict that
+        # matches what the React dashboard expects (productId, entryPriceUsd, …).
+        def _flatten_trade(t: dict) -> dict:
+            entry = t.get("entry") or {}
+            exit_ = t.get("exit") or {}
+            perf = t.get("performance") or {}
+            return {
+                "productId": t.get("product_id") or "",
+                "mode": t.get("mode") or "paper",
+                "entryTimestampUtc": entry.get("timestamp") or "",
+                "exitTimestampUtc": exit_.get("timestamp") or "",
+                "entryPriceUsd": float(entry.get("price_usd") or 0),
+                "exitPriceUsd": float(exit_.get("price_usd") or 0),
+                "exitReason": exit_.get("reason") or "",
+                "pnlUsd": float(perf.get("pnl_usd") or 0),
+                "pnlPercentage": float(perf.get("pnl_percentage") or 0),
+                "allocatedCapitalUsd": float(entry.get("allocated_capital_usd") or 0),
+                "status": perf.get("status") or "",
+            }
+
+        # Full realized history (partial + closed), newest first.
         max_trades = int(os.environ.get("SUMMARY_MAX_TRADES", "500"))
         recent_closed = sorted(
             realized_events,
-            key=lambda trade: trade.get("exit", {}).get("timestamp", ""),
+            key=lambda t: (t.get("exit") or {}).get("timestamp", ""),
             reverse=True,
         )[:max_trades]
 
         payload = {
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            # All keys are camelCase so the React dashboard can use this endpoint
+            # directly without a translation layer (no C# proxy needed).
+            "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
             "summary": {
-                "closed_trades": len(closed),
-                "partial_takes": len(realized_events) - len(closed),
-                "total_realized_events": len(realized_events),
+                "closedTrades": len(closed),
+                "partialTakes": len(realized_events) - len(closed),
                 "wins": wins,
                 "losses": losses,
-                "win_rate_pct": round((wins / len(closed) * 100), 2) if closed else 0.0,
-                "realized_pnl_usd": round(realized_total, 2),
-                "open_positions": len(open_positions),
-                "unrealized_pnl_usd": round(unrealized_total, 2),
-                "total_pnl_usd": round(realized_total + unrealized_total, 2),
-                "allocated_usd": round(sum(position["allocated_usd"] for position in open_positions), 2),
+                "winRatePct": round((wins / len(closed) * 100), 2) if closed else 0.0,
+                "realizedPnlUsd": round(realized_total, 2),
+                "openPositions": len(open_positions),
+                "unrealizedPnlUsd": round(unrealized_total, 2),
+                "totalPnlUsd": round(realized_total + unrealized_total, 2),
+                "allocatedUsd": round(sum(p["allocatedUsd"] for p in open_positions), 2),
+                # Total capital ever committed to trade entries (open + closed/partial).
+                "totalInvestedUsd": round(total_invested_usd, 2),
             },
             "daily": daily_rows,
-            "open_positions": open_positions,
-            "recent_closed_trades": recent_closed,
+            "openPositions": open_positions,
+            "recentClosedTrades": [_flatten_trade(t) for t in recent_closed],
         }
         return func.HttpResponse(json.dumps(payload), status_code=200, mimetype="application/json")
     except Exception as exc:
