@@ -48,6 +48,12 @@ MAX_DAILY_LOSS_PCT      = float(os.environ.get("MAX_DAILY_LOSS_PCT",        "5.0
 DYNAMIC_SIZING_ENABLED  = os.environ.get("DYNAMIC_SIZING_ENABLED", "true").lower() == "true"
 DYNAMIC_SIZE_MIN_PCT    = float(os.environ.get("DYNAMIC_SIZE_MIN_PCT",  "50"))   # % at lowest allowed score
 DYNAMIC_SIZE_MAX_PCT    = float(os.environ.get("DYNAMIC_SIZE_MAX_PCT", "150"))   # % at score 100
+FRAGILE_SIZE_CAP_ENABLED = os.environ.get("FRAGILE_SIZE_CAP_ENABLED", "true").lower() == "true"
+FRAGILE_LOW_PRICE_THRESHOLD_USD = float(os.environ.get("FRAGILE_LOW_PRICE_THRESHOLD_USD", "0.001"))
+FRAGILE_LOW_VOLUME_THRESHOLD_USD = float(os.environ.get("FRAGILE_LOW_VOLUME_THRESHOLD_USD", "1000000"))
+FRAGILE_MAX_POSITION_PCT = float(os.environ.get("FRAGILE_MAX_POSITION_PCT", "30"))
+FRAGILE_FULL_SIZE_MIN_SCORE = float(os.environ.get("FRAGILE_FULL_SIZE_MIN_SCORE", "90"))
+FRAGILE_FULL_SIZE_MIN_CONSENSUS = int(os.environ.get("FRAGILE_FULL_SIZE_MIN_CONSENSUS", "3"))
 
 # Minimum probability score (0-100) required before entering a position
 MIN_SIGNAL_SCORE    = float(os.environ.get("MIN_SIGNAL_SCORE",    "80"))
@@ -201,6 +207,9 @@ TAKE_PROFIT_PERCENT   = float(os.environ.get("TAKE_PROFIT_PERCENT",  "15.0")) # 
 TRAILING_PERCENT      = float(os.environ.get("TRAILING_PERCENT",     "5.0"))  # 5% trailing floor
 MOON_BAG_PERCENT      = max(0.0, min(100.0, float(os.environ.get("MOON_BAG_PERCENT", "30.0"))))
 TAKE_PROFIT_SELL_PERCENT = 100.0 - MOON_BAG_PERCENT
+QUICK_TAKE_PROFIT_ENABLED = os.environ.get("QUICK_TAKE_PROFIT_ENABLED", "true").lower() == "true"
+QUICK_TAKE_PROFIT_PERCENT = float(os.environ.get("QUICK_TAKE_PROFIT_PERCENT", "2.5"))
+QUICK_TAKE_PROFIT_SELL_PERCENT = max(0.0, min(100.0, float(os.environ.get("QUICK_TAKE_PROFIT_SELL_PERCENT", "50"))))
 LOOP_INTERVAL_SECONDS = 300     # 5-minute loop
 
 # Dynamic trailing stop. A flat 5% trail shakes you out of big runners on the
@@ -249,6 +258,7 @@ TRAIL_TIERS = _parse_trail_tiers(TRAIL_TIERS_RAW)
 # Bearish-reversal exit: sell when the trend flips bearish on candles.
 BEARISH_DROP_PCT      = float(os.environ.get("BEARISH_DROP_PCT", "1.5"))   # red candle size
 BEARISH_VOL_RATIO     = float(os.environ.get("BEARISH_VOL_RATIO", "1.5"))  # vol confirms selling
+BEARISH_REVERSAL_MIN_CONFIRMATIONS = int(os.environ.get("BEARISH_REVERSAL_MIN_CONFIRMATIONS", "2"))
 
 # Exit quality controls. Without these, a noisy 5m bearish pattern can close a
 # $1000 position for only a few dollars before the setup has room to work.
@@ -256,7 +266,8 @@ BREAKEVEN_STOP_ENABLED = os.environ.get("BREAKEVEN_STOP_ENABLED", "true").lower(
 BREAKEVEN_TRIGGER_PCT  = float(os.environ.get("BREAKEVEN_TRIGGER_PCT", "1.2"))
 BREAKEVEN_BUFFER_PCT   = float(os.environ.get("BREAKEVEN_BUFFER_PCT", "0.15"))
 BEARISH_EXIT_MIN_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_MIN_PROFIT_PCT", "3.0"))
-BEARISH_EXIT_MAX_LOSS_PCT   = float(os.environ.get("BEARISH_EXIT_MAX_LOSS_PCT", "-1.0"))
+BEARISH_EXIT_MAX_LOSS_PCT   = float(os.environ.get("BEARISH_EXIT_MAX_LOSS_PCT", "-0.75"))
+BEARISH_EXIT_SEVERE_MIN_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_SEVERE_MIN_PROFIT_PCT", "8.0"))
 BEARISH_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("BEARISH_EXIT_MIN_HOLD_MINUTES", "90"))
 BEARISH_EXIT_STALL_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_STALL_PROFIT_PCT", "0.75"))
 
@@ -1697,13 +1708,12 @@ def obv_filter_result(product_data: dict) -> dict:
 
 def detect_bearish_reversal(product_id: str, candles: list[list] | None = None) -> dict:
     """
-    Detects a bearish trend flip from OHLCV candles so an open position can be exited
-    before the trailing stop is hit. Returns {bearish: bool, reason: str}.
+    Detects a consolidated bearish trend flip from OHLCV candles.
 
-    Bearish if any of:
-      - Breakdown: latest close drops below the recent base low.
-      - Distribution candle: a strong red candle on rising volume.
-      - Lower highs: the most recent highs are stepping down (momentum fading).
+    A single red candle is often just a shakeout before the next leg. To avoid
+    closing runners too early, the exit engine only treats this as bearish when
+    multiple independent symptoms agree: support break, distribution volume, and
+    lower-high momentum fade.
     """
     if candles is None:
         candles = fetch_candles(product_id)
@@ -1728,12 +1738,13 @@ def detect_bearish_reversal(product_id: str, candles: list[list] | None = None) 
     move_pct = (l_close - l_open) / l_open * 100
 
     # 1) Breakdown below the base support
+    signals = []
     if l_close < min(base_lows):
-        return {"bearish": True, "reason": "BREAKDOWN_BELOW_BASE_LOW"}
+        signals.append("BREAKDOWN_BELOW_BASE_LOW")
 
     # 2) Strong red candle confirmed by volume (distribution)
     if move_pct <= -abs(BEARISH_DROP_PCT) and vol_ratio >= BEARISH_VOL_RATIO:
-        return {"bearish": True, "reason": "BEARISH_VOLUME_CANDLE"}
+        signals.append("BEARISH_VOLUME_CANDLE")
 
     # 3) Lower highs with CONFIRMED structural breakdown (not just a normal pullback).
     # Requires: lower highs in the second half AND a meaningful drop from the recent
@@ -1747,9 +1758,22 @@ def detect_bearish_reversal(product_id: str, candles: list[list] | None = None) 
         drop_from_high_pct = ((max_recent_high - l_close) / max_recent_high * 100) if max_recent_high > 0 else 0.0
         if (second_half_high < first_half_high
                 and drop_from_high_pct >= abs(BEARISH_DROP_PCT)
-                and vol_ratio >= BEARISH_VOL_RATIO
                 and l_close < l_open):
-            return {"bearish": True, "reason": "LOWER_HIGHS_FADING"}
+            signals.append("LOWER_HIGHS_FADING")
+
+    min_confirmations = max(1, BEARISH_REVERSAL_MIN_CONFIRMATIONS)
+    severe = "BREAKDOWN_BELOW_BASE_LOW" in signals and "BEARISH_VOLUME_CANDLE" in signals
+    if len(signals) >= min_confirmations:
+        reason = "CONFIRMED_" + "_AND_".join(signals)
+        return {
+            "bearish": True,
+            "reason": reason,
+            "signals": signals,
+            "confirmation_count": len(signals),
+            "severe": severe,
+            "move_pct": round(move_pct, 3),
+            "volume_ratio": round(vol_ratio, 3),
+        }
 
     return {"bearish": False, "reason": ""}
 
@@ -2043,6 +2067,36 @@ def _position_size_for_score(score: float) -> float:
           ((score - float(MIN_SIGNAL_SCORE)) / score_range if score_range > 0 else 1.0)
     pct = max(50.0, min(200.0, pct))  # hard clamp regardless of env vars
     return round(CAPITAL_PER_TRADE_USD * pct / 100.0, 2)
+
+
+def _risk_adjusted_position_size(product_data: dict, signal: dict, base_size: float) -> tuple[float, list[str]]:
+    """Caps fragile low-price or low-liquidity entries unless confirmation is excellent."""
+    reasons = []
+    if not FRAGILE_SIZE_CAP_ENABLED:
+        return base_size, reasons
+
+    price = float(product_data.get("price", 0.0) or 0.0)
+    dollar_volume = float(product_data.get("dollar_volume_24h", 0.0) or 0.0)
+    consensus = int(signal.get("consensus_count", 0) or 0)
+    score = float(signal.get("score", 0.0) or 0.0)
+    fragile = False
+
+    if 0 < price <= FRAGILE_LOW_PRICE_THRESHOLD_USD:
+        fragile = True
+        reasons.append(f"low price ${price:,.6g}")
+    if 0 < dollar_volume < FRAGILE_LOW_VOLUME_THRESHOLD_USD:
+        fragile = True
+        reasons.append(f"24h volume ${dollar_volume:,.0f}")
+
+    if not fragile:
+        return base_size, reasons
+    if score >= FRAGILE_FULL_SIZE_MIN_SCORE and consensus >= FRAGILE_FULL_SIZE_MIN_CONSENSUS:
+        return base_size, []
+
+    cap_pct = max(10.0, min(100.0, FRAGILE_MAX_POSITION_PCT))
+    capped_size = round(min(base_size, CAPITAL_PER_TRADE_USD * cap_pct / 100.0), 2)
+    reasons.append(f"capped at {cap_pct:.0f}% until score/consensus improves")
+    return capped_size, reasons
 
 
 def _capital_deployed(active_positions: dict) -> float:
@@ -2430,9 +2484,13 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 print(f"  [MTF OK]   {product_id}: {mtf['summary']}")
 
             position_size      = _position_size_for_score(signal["score"])
+            sizing_reasons     = []
             if signal.get("strategy") == "EARLY_MOMENTUM_RUNNER":
                 momentum_cap = CAPITAL_PER_TRADE_USD * max(10.0, min(100.0, MOMENTUM_RUNNER_MAX_POSITION_PCT)) / 100.0
                 position_size = min(position_size, round(momentum_cap, 2))
+                sizing_reasons.append(f"runner cap {MOMENTUM_RUNNER_MAX_POSITION_PCT:.0f}%")
+            position_size, fragile_reasons = _risk_adjusted_position_size(prod, signal, position_size)
+            sizing_reasons.extend(fragile_reasons)
             size_pct           = round(position_size / CAPITAL_PER_TRADE_USD * 100)
 
             if _budget_is_full(active_positions, next_size=position_size):
@@ -2477,7 +2535,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                     order = client.market_order_buy(
                         client_order_id=f"trader-{product_id}-{int(datetime.now(timezone.utc).timestamp())}",
                         product_id=product_id,
-                        quote_size=str(round(CAPITAL_PER_TRADE_USD, 2)),
+                        quote_size=str(round(position_size, 2)),
                     )
                     order_id = order.get("order_id", "unknown")
                     print(f"  [LIVE ORDER] {product_id} order_id={order_id}")
@@ -2498,7 +2556,10 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 "highest_tracked_price":  price,
                 "current_trailing_stop":  initial_stop,
                 "take_profit_boundary":   take_profit_target,
+                "quick_take_profit_boundary": price * (1 + QUICK_TAKE_PROFIT_PERCENT / 100),
+                "quick_take_profit_taken": False,
                 "partial_take_profit_taken": False,
+                "quick_take_profit_sell_percent": QUICK_TAKE_PROFIT_SELL_PERCENT,
                 "take_profit_sell_percent": TAKE_PROFIT_SELL_PERCENT,
                 "moon_bag_percent":       MOON_BAG_PERCENT,
             }
@@ -2533,6 +2594,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             raw_score = signal.get("raw_score", signal["score"])
             bonus = signal.get("consensus_bonus", 0.0)
             bonus_str = f" +{bonus:.0f} bonus" if bonus > 0 else ""
+            sizing_note = f"\n   Sizing: {'; '.join(sizing_reasons)}" if sizing_reasons else ""
             conf_emoji = {"HIGH": "🔥", "MEDIUM": "⚡", "SINGLE": "📍"}.get(confidence_label, "📍")
             mode_emoji = "🟢"
             confirming_str = " + ".join(s.replace("_", " ") for s in confirming_strategies)
@@ -2543,9 +2605,10 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 f"   Strategy: {signal['strategy'].replace('_', ' ')}\n"
                 f"   Confirmed by: {confirming_str}\n"
                 f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  |  Runner {prod.get('momentum_runner_score', 0):.0f}  (all /100)\n"
-                f"📈 TP: ${take_profit_target:,.6g} (+{TAKE_PROFIT_PERCENT:.0f}%)  |  Stop: ${initial_stop:,.6g} [{_stop_method}]\n"
+                f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%/{QUICK_TAKE_PROFIT_SELL_PERCENT:.0f}%  |  Main TP: ${take_profit_target:,.6g} (+{TAKE_PROFIT_PERCENT:.0f}%)  |  Stop: ${initial_stop:,.6g} [{_stop_method}]\n"
                 f"💧 24h Vol: ${liquidity.get('dollar_volume_24h', 0.0):,.0f}  |  OBV: {obv.get('metrics', {}).get('obv_pressure_pct', 0.0):+.1f}%\n"
                 f"🏦 Budget used: ${_capital_deployed(active_positions):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions)}/{MAX_OPEN_POSITIONS} slots)"
+                f"{sizing_note}"
             )
             print(f"  {msg}")
             send_discord_alert(msg)
@@ -2624,25 +2687,28 @@ def _position_held_minutes(pos: dict) -> int:
 
 def _should_exit_on_bearish_reversal(pos: dict, current_price: float, reversal: dict) -> tuple[bool, str]:
     """
-    Filters noisy bearish-reversal exits. We still exit immediately to protect a
-    meaningful profit, after partial TP, or when the reversal is already causing
-    a real drawdown. Small green trades get more room instead of churning.
+    Filters noisy bearish-reversal exits. The bot should not close promising
+    runners just because one pullback candle appears; quick TP/breakeven handles
+    early protection, while the main target remains 15%+.
     """
     profit_pct = _position_profit_pct(pos, current_price)
     held_minutes = _position_held_minutes(pos)
+    severe = bool(reversal.get("severe"))
+    confirmations = int(reversal.get("confirmation_count", 0) or 0)
 
     if pos.get("partial_take_profit_taken"):
         return True, "moon bag has already paid; protect runner"
     if profit_pct <= BEARISH_EXIT_MAX_LOSS_PCT:
         return True, f"loss {profit_pct:+.2f}% <= {BEARISH_EXIT_MAX_LOSS_PCT:+.2f}%"
-    if profit_pct >= BEARISH_EXIT_MIN_PROFIT_PCT:
-        return True, f"lock meaningful gain {profit_pct:+.2f}%"
+    if severe and profit_pct >= BEARISH_EXIT_SEVERE_MIN_PROFIT_PCT:
+        return True, f"severe reversal; lock larger gain {profit_pct:+.2f}%"
     if held_minutes >= BEARISH_EXIT_MIN_HOLD_MINUTES and profit_pct <= BEARISH_EXIT_STALL_PROFIT_PCT:
         return True, f"stalled {held_minutes}m with {profit_pct:+.2f}%"
 
     return False, (
         f"hold despite {reversal.get('reason', 'bearish signal')}: "
-        f"{profit_pct:+.2f}% after {held_minutes}m"
+        f"{profit_pct:+.2f}% after {held_minutes}m "
+        f"({confirmations} confirmations, severe={severe})"
     )
 
 
@@ -2664,11 +2730,20 @@ def _migrate_legacy_position(pos: dict) -> bool:
     if "moon_bag_percent" not in pos:
         pos["moon_bag_percent"] = MOON_BAG_PERCENT
         changed = True
+    if "quick_take_profit_taken" not in pos:
+        pos["quick_take_profit_taken"] = False
+        changed = True
+    if "quick_take_profit_sell_percent" not in pos:
+        pos["quick_take_profit_sell_percent"] = QUICK_TAKE_PROFIT_SELL_PERCENT
+        changed = True
 
     # If the stored TP boundary reflects a LOWER TP% than the current env var,
     # upgrade it so old positions benefit from the corrected setting.
     entry_price = float(pos.get("entry_price", 0.0) or 0.0)
     current_tp = float(pos.get("take_profit_boundary", 0.0) or 0.0)
+    if entry_price > 0 and "quick_take_profit_boundary" not in pos:
+        pos["quick_take_profit_boundary"] = round(entry_price * (1 + QUICK_TAKE_PROFIT_PERCENT / 100), 8)
+        changed = True
     if entry_price > 0 and current_tp > 0 and not pos.get("partial_take_profit_taken"):
         stored_tp_pct = (current_tp - entry_price) / entry_price * 100
         if stored_tp_pct < TAKE_PROFIT_PERCENT - 0.5:   # allow 0.5% tolerance
@@ -2750,6 +2825,93 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
 
         exit_triggered = False
         exit_reason    = ""
+
+        quick_tp = float(pos.get("quick_take_profit_boundary", 0.0) or 0.0)
+        if (
+            QUICK_TAKE_PROFIT_ENABLED
+            and quick_tp > 0
+            and current_price >= quick_tp
+            and not pos.get("quick_take_profit_taken", False)
+            and not pos.get("partial_take_profit_taken", False)
+        ):
+            sell_fraction = max(0.0, min(1.0, float(pos.get("quick_take_profit_sell_percent", QUICK_TAKE_PROFIT_SELL_PERCENT) or 0.0) / 100.0))
+            if sell_fraction > 0.0:
+                partial_qty = float(pos["simulated_qty"]) * sell_fraction
+                partial_allocated = float(pos.get("allocated_usd", CAPITAL_PER_TRADE_USD) or 0.0) * sell_fraction
+                partial_value = partial_qty * current_price
+                pnl_usd = partial_value - partial_allocated
+                pnl_pct = (pnl_usd / partial_allocated) * 100 if partial_allocated else 0.0
+                mode_label = "LIVE SELL" if pos.get("mode") == "live" else "PAPER SELL"
+
+                if pos.get("mode") == "live":
+                    try:
+                        order = client.market_order_sell(
+                            client_order_id=f"trader-quick-tp-{product_id}-{int(datetime.now(timezone.utc).timestamp())}",
+                            product_id=product_id,
+                            base_size=str(round(partial_qty, 8)),
+                        )
+                        print(f"  [LIVE QUICK TP SELL] {product_id} order_id={order.get('order_id', 'unknown')}")
+                    except Exception as exc:
+                        print(f"  [LIVE QUICK TP SELL ERROR] {product_id}: {exc}")
+                        continue
+
+                pos["simulated_qty"] = float(pos["simulated_qty"]) - partial_qty
+                pos["allocated_usd"] = float(pos.get("allocated_usd", CAPITAL_PER_TRADE_USD) or 0.0) - partial_allocated
+                pos["quick_take_profit_taken"] = True
+                pos["quick_take_profit_at"] = _utcnow_iso()
+                breakeven_stop = float(pos.get("entry_price", 0.0) or 0.0) * (1 + BREAKEVEN_BUFFER_PCT / 100)
+                if breakeven_stop > float(pos.get("current_trailing_stop", 0.0) or 0.0):
+                    pos["current_trailing_stop"] = breakeven_stop
+                    pos["breakeven_stop_active"] = True
+
+                trade_record = {
+                    "strategy":         "Automated Multi-Asset Watchlist Engine",
+                    "product_id":       product_id,
+                    "mode":             pos.get("mode", "paper"),
+                    "live_data_source": "Coinbase Advanced API",
+                    "config": {
+                        "trailing_percent":                 TRAILING_PERCENT,
+                        "quick_take_profit_percent":        QUICK_TAKE_PROFIT_PERCENT,
+                        "quick_take_profit_sell_percent":   sell_fraction * 100,
+                        "take_profit_percent":              TAKE_PROFIT_PERCENT,
+                        "total_capital_usd":                TOTAL_CAPITAL_USD,
+                    },
+                    "entry": {
+                        "timestamp":             pos["entry_timestamp"],
+                        "price_usd":             pos["entry_price"],
+                        "allocated_capital_usd": partial_allocated,
+                        "simulated_quantity":    partial_qty,
+                    },
+                    "exit": {
+                        "timestamp":                 _utcnow_iso(),
+                        "reason":                    "QUICK_TAKE_PROFIT_PARTIAL",
+                        "price_usd":                 current_price,
+                        "highest_tracked_price_usd": pos["highest_tracked_price"],
+                    },
+                    "performance": {
+                        "pnl_usd":        pnl_usd,
+                        "pnl_percentage": pnl_pct,
+                        "status":         "PARTIAL",
+                    },
+                }
+                history.append(trade_record)
+                record_daily_pnl(daily_ledger, product_id, pnl_usd)
+                changed = True
+
+                entry_price    = float(pos.get("entry_price", 0.0) or 0.0)
+                entry_strategy = pos.get("entry_strategy", "unknown").replace("_", " ")
+                entry_score    = pos.get("entry_strategy_score", pos.get("signal_score", 0))
+                move_from_entry = ((current_price - entry_price) / entry_price * 100) if entry_price else 0.0
+                msg = (
+                    f"🟡 [{mode_label}] {product_id} — Quick Take-Profit\n"
+                    f"💵 Exit: ${current_price:,.6g}  |  Entry: ${entry_price:,.6g} ({move_from_entry:+.2f}%)\n"
+                    f"💰 Realized: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) on {sell_fraction * 100:.0f}% sold\n"
+                    f"🛡️ Stop: ${pos['current_trailing_stop']:,.6g}  |  Remaining size: ${float(pos.get('allocated_usd', 0.0) or 0.0):,.2f}\n"
+                    f"📊 Entry strategy: {entry_strategy} (score {entry_score:.0f})"
+                )
+                print(f"  {msg}")
+                send_discord_alert(msg)
+                continue
 
         if current_price >= pos["take_profit_boundary"] and not pos.get("partial_take_profit_taken", False):
             sell_fraction = max(0.0, min(1.0, float(pos.get("take_profit_sell_percent", TAKE_PROFIT_SELL_PERCENT) or 0.0) / 100.0))
@@ -2931,6 +3093,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
             peak_gain_pct   = ((peak_price - entry_price) / entry_price * 100) if entry_price else 0.0
             move_from_entry = ((current_price - entry_price) / entry_price * 100) if entry_price else 0.0
             had_partial     = bool(pos.get("partial_take_profit_taken"))
+            had_quick       = bool(pos.get("quick_take_profit_taken"))
             held_mins       = 0
             if entry_ts:
                 try:
@@ -2945,6 +3108,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                 f"💵 Exit: ${current_price:,.6g}  |  Entry was: ${entry_price:,.6g} ({move_from_entry:+.2f}%)\n"
                 f"⏱️  Held: {held_str}  |  Peak: ${peak_price:,.6g} (+{peak_gain_pct:.2f}% from entry)\n"
                 f"💰 PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)"
+                + ("  [had quick TP]" if had_quick else "")
                 + ("  [had partial TP]" if had_partial else "") + "\n"
                 f"📊 Entry: {entry_strategy} — score {entry_score:.0f}/100 [{entry_conf}]\n"
                 f"   Confirmed by: {confirming_str}"
