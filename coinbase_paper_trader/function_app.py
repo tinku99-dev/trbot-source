@@ -1112,6 +1112,39 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
             for day, values in sorted(daily.items(), reverse=True)
         ]
 
+        def _parse_exit_timestamp(trade: dict):
+            value = (trade.get("exit") or {}).get("timestamp") or ""
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        rolling_windows = []
+        rolling_days = [
+            int(value.strip())
+            for value in os.environ.get("SUMMARY_ROLLING_WINDOWS_DAYS", "1,7,30").split(",")
+            if value.strip().isdigit()
+        ]
+        now_utc = datetime.now(timezone.utc)
+        for days in rolling_days:
+            cutoff = now_utc - timedelta(days=days)
+            window_events = []
+            for trade in realized_events:
+                exit_dt = _parse_exit_timestamp(trade)
+                if exit_dt and exit_dt >= cutoff:
+                    window_events.append(trade)
+            window_closed = [
+                trade for trade in window_events
+                if (trade.get("performance") or {}).get("status") == "CLOSED"
+            ]
+            window_pnl = sum(float((trade.get("performance") or {}).get("pnl_usd", 0) or 0) for trade in window_events)
+            rolling_windows.append({
+                "days": days,
+                "closedTrades": len(window_closed),
+                "partialTakes": len(window_events) - len(window_closed),
+                "realizedPnlUsd": round(window_pnl, 2),
+            })
+
         # Flatten each realized-event record into a clean camelCase dict that
         # matches what the React dashboard expects (productId, entryPriceUsd, …).
         def _flatten_trade(t: dict) -> dict:
@@ -1159,6 +1192,7 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
                 "totalInvestedUsd": round(total_invested_usd, 2),
             },
             "daily": daily_rows,
+            "rollingWindows": rolling_windows,
             "openPositions": open_positions,
             "recentClosedTrades": [_flatten_trade(t) for t in recent_closed],
         }

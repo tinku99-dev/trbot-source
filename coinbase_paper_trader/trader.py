@@ -258,28 +258,117 @@ _BLOB_CONN_STR = (
     or os.environ.get("AzureWebJobsStorage", "")
 )
 _BLOB_CONTAINER = os.environ.get("STATE_CONTAINER_NAME", "cointracking-state")
+_BLOB_PRIMARY = os.environ.get("STATE_BLOB_PRIMARY", "true").lower() != "false"
+_STATE_RECONCILE_LOCAL_NEWER = os.environ.get("STATE_RECONCILE_LOCAL_NEWER", "true").lower() != "false"
+_STATE_BACKUP_ENABLED = os.environ.get("STATE_BACKUP_ENABLED", "true").lower() != "false"
+_STATE_BACKUP_PREFIX = os.environ.get("STATE_BACKUP_PREFIX", "trader-state-backups")
+_STATE_BACKUP_MIN_INTERVAL_SECONDS = int(os.environ.get("STATE_BACKUP_MIN_INTERVAL_SECONDS", "900"))
+_STATE_BACKUP_FILES = {
+    PORTFOLIO_FILE,
+    HISTORY_FILE,
+    DAILY_PNL_FILE,
+    SUMMARY_STATE_FILE,
+    DAILY_SUMMARY_STATE_FILE,
+}
+_last_state_backup_epoch: dict[str, int] = {}
 
 def _blob_name(filepath: str) -> str:
     return "trader-state/" + os.path.basename(filepath)
 
-def _load_from_blob(filepath: str):
+def _state_backup_name(filepath: str) -> str:
+    now = datetime.now(timezone.utc)
+    basename = os.path.basename(filepath)
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    return f"{_STATE_BACKUP_PREFIX}/{now:%Y-%m-%d}/{basename}/{stamp}.json"
+
+def _write_local_cache(filepath: str, data) -> None:
+    try:
+        directory = os.path.dirname(filepath)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=4)
+    except OSError:
+        pass
+
+def _read_local_json(filepath: str):
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with open(filepath, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+def _state_record_count(data) -> int:
+    if isinstance(data, (dict, list)):
+        return len(data)
+    return 0
+
+def _local_is_newer_than_blob(filepath: str, blob_last_modified) -> bool:
+    if not blob_last_modified:
+        return False
+    try:
+        local_modified = datetime.fromtimestamp(os.path.getmtime(filepath), timezone.utc)
+    except OSError:
+        return False
+    return local_modified > blob_last_modified + timedelta(seconds=30)
+
+def _should_promote_local_state(filepath: str, local_data, blob_data, blob_last_modified) -> bool:
+    if not _STATE_RECONCILE_LOCAL_NEWER or local_data is None:
+        return False
+    local_count = _state_record_count(local_data)
+    blob_count = _state_record_count(blob_data)
+    if local_count <= 0:
+        return False
+    if blob_count <= 0:
+        return True
+    basename = os.path.basename(filepath)
+    if basename == HISTORY_FILE and local_count > blob_count:
+        return True
+    return _local_is_newer_than_blob(filepath, blob_last_modified)
+
+def _load_from_blob(filepath: str, write_cache: bool = True):
     if not _BLOB_CONN_STR:
         return None
+    data, _ = _load_from_blob_with_metadata(filepath)
+    if data is not None and write_cache:
+        _write_local_cache(filepath, data)
+    return data
+
+def _load_from_blob_with_metadata(filepath: str):
+    if not _BLOB_CONN_STR:
+        return None, None
     try:
         from azure.storage.blob import BlobServiceClient
         client = BlobServiceClient.from_connection_string(_BLOB_CONN_STR)
         blob = client.get_blob_client(container=_BLOB_CONTAINER, blob=_blob_name(filepath))
+        properties = blob.get_blob_properties()
         raw = blob.download_blob().readall().decode("utf-8")
         data = json.loads(raw)
-        # Write local cache so subsequent calls skip blob
-        try:
-            with open(filepath, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=4)
-        except OSError:
-            pass
-        return data
+        return data, properties.last_modified
     except Exception:
-        return None
+        return None, None
+
+def _backup_existing_blob(container, blob, filepath: str, new_payload: str) -> None:
+    if not _STATE_BACKUP_ENABLED or os.path.basename(filepath) not in _STATE_BACKUP_FILES:
+        return
+    now = _utcnow_epoch()
+    blob_key = _blob_name(filepath)
+    last_backup = _last_state_backup_epoch.get(blob_key, 0)
+    if last_backup and now - last_backup < _STATE_BACKUP_MIN_INTERVAL_SECONDS:
+        return
+    try:
+        if not blob.exists():
+            return
+        current_payload = blob.download_blob().readall().decode("utf-8")
+        if not current_payload or current_payload == new_payload:
+            return
+        backup = container.get_blob_client(_state_backup_name(filepath))
+        backup.upload_blob(current_payload, overwrite=False)
+        _last_state_backup_epoch[blob_key] = now
+    except Exception as exc:
+        print(f"[Blob] backup failed for {os.path.basename(filepath)}: {exc}")
 
 def _save_to_blob(filepath: str, data) -> None:
     if not _BLOB_CONN_STR:
@@ -291,7 +380,9 @@ def _save_to_blob(filepath: str, data) -> None:
         if not container.exists():
             container.create_container()
         blob = container.get_blob_client(_blob_name(filepath))
-        blob.upload_blob(json.dumps(data, indent=4), overwrite=True)
+        payload = json.dumps(data, indent=4)
+        _backup_existing_blob(container, blob, filepath, payload)
+        blob.upload_blob(payload, overwrite=True)
     except Exception as exc:
         print(f"[Blob] save failed for {os.path.basename(filepath)}: {exc}")
 
@@ -399,18 +490,24 @@ def send_discord_alert(message: str, retries: int = 3) -> bool:
 
 
 def load_json_file(filepath: str):
-    """Loads JSON from local disk; falls back to blob storage on cold start."""
+    """Loads JSON state. In Azure, Blob is the source of truth; disk is cache."""
     filepath = _data_path(filepath)
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as fh:
-                return json.load(fh)
-        except (json.JSONDecodeError, OSError):
-            pass
-    # Local file missing (cold start / ephemeral disk) — try blob fallback
-    blob_data = _load_from_blob(filepath)
-    if blob_data is not None:
-        return blob_data
+    local_data = _read_local_json(filepath)
+    if _BLOB_PRIMARY:
+        blob_data, blob_last_modified = _load_from_blob_with_metadata(filepath)
+        if blob_data is not None:
+            if _should_promote_local_state(filepath, local_data, blob_data, blob_last_modified):
+                print(f"[State] Promoting newer local {os.path.basename(filepath)} to blob storage.")
+                _save_to_blob(filepath, local_data)
+                return local_data
+            _write_local_cache(filepath, blob_data)
+            return blob_data
+    if local_data is not None:
+        return local_data
+    if not _BLOB_PRIMARY:
+        blob_data = _load_from_blob(filepath)
+        if blob_data is not None:
+            return blob_data
     return [] if "history" in filepath else {}
 
 

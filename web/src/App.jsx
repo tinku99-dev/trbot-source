@@ -159,6 +159,7 @@ function PaperTradingDashboard() {
   // Show the complete daily history, newest first. Sort explicitly so the view
   // is independent of the API's ordering.
   const dailyRows = [...(data?.daily || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
+  const rollingRows = data?.rollingWindows || []
   const recentTrades = data?.recentClosedTrades || []
   const isLoading = status === 'loading'
 
@@ -235,12 +236,19 @@ function PaperTradingDashboard() {
         </Panel>
 
         <Panel title="Daily P/L" meta={`${dailyRows.length} days`}>
-          {dailyRows.length ? (
+          {dailyRows.length || rollingRows.length ? (
             <div className="daily-list">
+              {rollingRows.map((window) => (
+                <div className="daily-row" key={`rolling-${window.days}`}>
+                  <span>{window.days}d rolling</span>
+                  <span>{(window.closedTrades || 0)} closed / {(window.partialTakes || 0)} partial</span>
+                  <strong className={pnlClass(window.realizedPnlUsd)}>{formatCurrency(window.realizedPnlUsd)}</strong>
+                </div>
+              ))}
               {dailyRows.map((day) => (
                 <div className="daily-row" key={day.date}>
                   <span>{day.date}</span>
-                  <span>{(day.closedTrades || 0)} trades</span>
+                  <span>{(day.closedTrades || 0)} closed / {(day.partialTakes || 0)} partial</span>
                   <strong className={pnlClass(day.realizedPnlUsd)}>{formatCurrency(day.realizedPnlUsd)}</strong>
                 </div>
               ))}

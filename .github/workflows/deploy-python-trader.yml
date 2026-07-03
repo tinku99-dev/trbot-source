@@ -16,6 +16,7 @@ env:
   AZURE_CLIENT_ID: 9b765859-a84a-4b9f-8bc8-46539131026b
   AZURE_TENANT_ID: da34c113-8b4f-453a-b7d8-92b6087438fb
   AZURE_SUBSCRIPTION_ID: 5f66945a-ed88-4f91-87bd-f3074c0d752c
+  AZURE_RESOURCE_GROUP: rg-trbot-prod
   PYTHON_VERSION: "3.11"
 
 jobs:
@@ -46,6 +47,64 @@ jobs:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Backup trader state before deployment
+        run: |
+          set -euo pipefail
+          conn=$(az functionapp config appsettings list \
+            --name "$AZURE_FUNCTIONAPP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "[?name=='STATE_STORAGE_CONNECTION_STRING'].value | [0]" \
+            -o tsv)
+          container=$(az functionapp config appsettings list \
+            --name "$AZURE_FUNCTIONAPP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "[?name=='STATE_CONTAINER_NAME'].value | [0]" \
+            -o tsv)
+          container=${container:-cointracking-state}
+          if [ -z "$conn" ]; then
+            echo "STATE_STORAGE_CONNECTION_STRING is not configured; skipping state backup."
+            exit 0
+          fi
+          prefix="pre-deploy/${GITHUB_RUN_ID}-${GITHUB_SHA:0:7}"
+          mkdir -p /tmp/trader-state-backup
+          for blob in \
+            trader-state/active_paper_positions.json \
+            trader-state/trading_history.json \
+            trader-state/daily_pnl_ledger.json; do
+            if az storage blob exists --connection-string "$conn" --container-name "$container" --name "$blob" --query exists -o tsv | grep -q true; then
+              target="$prefix/${blob#trader-state/}"
+              tmp="/tmp/trader-state-backup/${blob#trader-state/}"
+              az storage blob download \
+                --connection-string "$conn" \
+                --container-name "$container" \
+                --name "$blob" \
+                --file "$tmp" \
+                --overwrite true >/dev/null
+              az storage blob upload \
+                --connection-string "$conn" \
+                --container-name "$container" \
+                --name "$target" \
+                --file "$tmp" \
+                --overwrite true >/dev/null
+              echo "Backed up $blob to $target"
+            else
+              echo "No blob found for $blob"
+            fi
+          done
+          curl -fsS "https://func-coinbase-trader-v2.azurewebsites.net/api/paper-trading/summary" \
+            -o /tmp/paper-summary.json || exit 0
+          cat > /tmp/print-paper-summary.py <<'PY'
+          import json
+
+          payload = json.load(open('/tmp/paper-summary.json'))
+          summary = payload.get('summary') or {}
+          print(f"Pre-deploy active positions: {summary.get('openPositions', 0)}")
+          print(f"Pre-deploy total invested: ${summary.get('totalInvestedUsd', 0):,.2f}")
+          print(f"Pre-deploy realized P/L: ${summary.get('realizedPnlUsd', 0):+,.2f}")
+          PY
+          sed -i 's/^          //' /tmp/print-paper-summary.py
+          python /tmp/print-paper-summary.py
 
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
