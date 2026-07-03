@@ -8,17 +8,23 @@ on:
       - ".github/workflows/deploy-dotnet-bot.yml"
   workflow_dispatch:
 
-# Required GitHub secret:
-#   AZURE_FUNCTIONAPP_PUBLISH_PROFILE_DOTNET
-#     → Azure Portal → func-3qs3shmnmkj5m → Overview → Get publish profile → copy XML contents
+# Azure OIDC app registration: github-trbot-source-python-trader-deploy
+# Federated credential subject: repo:tinku99-dev/trbot-source:environment:production
 
 env:
   AZURE_FUNCTIONAPP_NAME: func-3qs3shmnmkj5m
+  AZURE_CLIENT_ID: 9b765859-a84a-4b9f-8bc8-46539131026b
+  AZURE_TENANT_ID: da34c113-8b4f-453a-b7d8-92b6087438fb
+  AZURE_SUBSCRIPTION_ID: 5f66945a-ed88-4f91-87bd-f3074c0d752c
   DOTNET_VERSION: "8.0.x"
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +40,15 @@ jobs:
       - name: Build & publish
         run: dotnet publish src/TradingResearchBot -c Release -o ./publish_out --no-restore
 
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: ./publish_out
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE_DOTNET }}

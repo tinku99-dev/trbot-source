@@ -8,19 +8,26 @@ on:
       - ".github/workflows/deploy-dashboard.yml"
   workflow_dispatch:
 
-# Required GitHub secrets:
-#   AZURE_STATIC_WEB_APPS_API_TOKEN
-#     → Azure Portal → trbot-dashboard-v2 → Overview → Manage deployment token → copy
-#
-# Required GitHub variables (Settings → Secrets and variables → Actions → Variables):
-#   VITE_PAPER_SUMMARY_URL  = https://func-coinbase-trader-v2.azurewebsites.net/api/paper-trading/summary
-#   VITE_CRYPTO_SCAN_URL    = https://func-coinbase-trader-v2.azurewebsites.net/api/crypto-scan
-#   VITE_TRBOT_FUNCTION_URL = https://func-3qs3shmnmkj5m.azurewebsites.net
-#   VITE_TRBOT_FUNCTION_KEY = <your-function-key>  (store as a SECRET not a variable)
+# Azure OIDC app registration: github-trbot-source-python-trader-deploy
+# Federated credential subject: repo:tinku99-dev/trbot-source:environment:production
+
+env:
+  AZURE_CLIENT_ID: 9b765859-a84a-4b9f-8bc8-46539131026b
+  AZURE_TENANT_ID: da34c113-8b4f-453a-b7d8-92b6087438fb
+  AZURE_SUBSCRIPTION_ID: 5f66945a-ed88-4f91-87bd-f3074c0d752c
+  AZURE_STATIC_WEB_APP_NAME: trbot-dashboard-v2
+  AZURE_RESOURCE_GROUP: rg-trbot-prod
+  VITE_PAPER_SUMMARY_URL: https://func-coinbase-trader-v2.azurewebsites.net/api/paper-trading/summary
+  VITE_CRYPTO_SCAN_URL: https://func-coinbase-trader-v2.azurewebsites.net/api/crypto-scan
+  VITE_TRBOT_FUNCTION_URL: https://func-3qs3shmnmkj5m.azurewebsites.net
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
     defaults:
       run:
         working-directory: web
@@ -43,16 +50,33 @@ jobs:
 
       - name: Build
         env:
-          VITE_PAPER_SUMMARY_URL: ${{ vars.VITE_PAPER_SUMMARY_URL }}
-          VITE_CRYPTO_SCAN_URL: ${{ vars.VITE_CRYPTO_SCAN_URL }}
-          VITE_TRBOT_FUNCTION_URL: ${{ vars.VITE_TRBOT_FUNCTION_URL }}
-          VITE_TRBOT_FUNCTION_KEY: ${{ secrets.VITE_TRBOT_FUNCTION_KEY }}
+          VITE_PAPER_SUMMARY_URL: ${{ env.VITE_PAPER_SUMMARY_URL }}
+          VITE_CRYPTO_SCAN_URL: ${{ env.VITE_CRYPTO_SCAN_URL }}
+          VITE_TRBOT_FUNCTION_URL: ${{ env.VITE_TRBOT_FUNCTION_URL }}
         run: npm run build
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get Static Web App deployment token
+        id: swa-token
+        run: |
+          token=$(az staticwebapp secrets list \
+            --name "$AZURE_STATIC_WEB_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "properties.apiKey" \
+            -o tsv)
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
         with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          azure_static_web_apps_api_token: ${{ steps.swa-token.outputs.token }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           action: upload
           app_location: web
