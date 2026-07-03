@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react'
 import './App.css'
 
 const PAPER_SUMMARY_URL = import.meta.env.VITE_PAPER_SUMMARY_URL
+const PAPER_CLOSE_URL = import.meta.env.VITE_PAPER_CLOSE_URL
+  || PAPER_SUMMARY_URL?.replace(/\/summary(?:\?.*)?$/, '/close')
+  || 'https://func-coinbase-trader-v2.azurewebsites.net/api/paper-trading/close'
 const TRBOT_FUNCTION_URL = import.meta.env.VITE_TRBOT_FUNCTION_URL || 'https://func-3qs3shmnmkj5m.azurewebsites.net'
 const CRYPTO_SCAN_URL = import.meta.env.VITE_CRYPTO_SCAN_URL || 'https://func-coinbase-trader-v2.azurewebsites.net/api/crypto-scan'
 
@@ -123,6 +126,9 @@ function PaperTradingDashboard() {
   const [data, setData] = useState(null)
   const [status, setStatus] = useState('loading')
   const [error, setError] = useState('')
+  const [closeKey, setCloseKey] = useState(() => window.localStorage.getItem('paper_close_function_key') || '')
+  const [closeStatus, setCloseStatus] = useState('')
+  const [closingId, setClosingId] = useState('')
 
   async function loadSummary() {
     if (!PAPER_SUMMARY_URL) {
@@ -154,6 +160,54 @@ function PaperTradingDashboard() {
     return () => window.clearTimeout(timerId)
   }, [])
 
+  function saveCloseKey(nextKey) {
+    setCloseKey(nextKey)
+    window.localStorage.setItem('paper_close_function_key', nextKey)
+  }
+
+  async function closePosition(productId = '') {
+    if (!PAPER_CLOSE_URL) {
+      setCloseStatus('Close endpoint is not configured for this build.')
+      return
+    }
+
+    const key = closeKey.trim()
+    if (!key) {
+      setCloseStatus('Add the Function key before closing a paper position.')
+      return
+    }
+
+    const target = productId || 'ALL'
+    const url = new URL(PAPER_CLOSE_URL, window.location.origin)
+    if (productId) {
+      url.searchParams.set('productId', productId)
+    } else {
+      url.searchParams.set('all', 'true')
+    }
+
+    try {
+      setClosingId(target)
+      setCloseStatus(productId ? `Closing ${productId}...` : 'Closing all open positions...')
+      const response = await fetch(url.toString(), {
+        method: 'POST',
+        headers: { 'x-functions-key': key },
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok || payload.error) {
+        throw new Error(payload.message || payload.error || `Close API returned ${response.status}`)
+      }
+
+      setCloseStatus(
+        `${payload.closedPositions || 0} closed, ${payload.remainingPositions || 0} remaining. Realized ${formatCurrency(payload.realizedPnlUsd)}.`
+      )
+      await loadSummary()
+    } catch (caught) {
+      setCloseStatus(caught instanceof Error ? caught.message : 'Unable to close paper position.')
+    } finally {
+      setClosingId('')
+    }
+  }
+
   const summary = data?.summary || {}
   const openPositions = data?.openPositions || []
   // Show the complete daily history, newest first. Sort explicitly so the view
@@ -177,10 +231,27 @@ function PaperTradingDashboard() {
 
       {error && <div className="alert">{error}</div>}
 
+      <section className="paper-controls" aria-label="Paper trading controls">
+        <input
+          type="password"
+          value={closeKey}
+          onChange={(event) => saveCloseKey(event.target.value)}
+          placeholder="Function key for closing paper positions"
+          aria-label="Function key for closing paper positions"
+          autoComplete="off"
+        />
+        <button type="button" onClick={() => closePosition()} disabled={!openPositions.length || closingId === 'ALL'}>
+          {closingId === 'ALL' ? 'Closing' : 'Close All'}
+        </button>
+        {closeStatus && <span className={closeStatus.includes('closed') ? 'positive' : ''}>{closeStatus}</span>}
+      </section>
+
       <section className="scoreboard" aria-label="Profit and loss summary">
         <Metric label="Total P/L" value={formatCurrency(summary.totalPnlUsd)} tone={pnlClass(summary.totalPnlUsd)} />
         <Metric label="Realized" value={formatCurrency(summary.realizedPnlUsd)} tone={pnlClass(summary.realizedPnlUsd)} />
         <Metric label="Unrealized" value={formatCurrency(summary.unrealizedPnlUsd)} tone={pnlClass(summary.unrealizedPnlUsd)} />
+        <Metric label="Cash" value={formatCurrency(summary.availableCashUsd)} />
+        <Metric label="Equity" value={formatCurrency(summary.totalEquityUsd)} tone={pnlClass(summary.totalPnlUsd)} />
         <Metric label="Total Invested" value={formatCurrency(summary.totalInvestedUsd)} />
         <Metric label="Allocated" value={formatCurrency(summary.allocatedUsd)} />
         <Metric label="Open" value={summary.openPositions ?? 0} />
@@ -204,6 +275,7 @@ function PaperTradingDashboard() {
                     <th>Take Profit</th>
                     <th>Held</th>
                     <th>Status</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -224,6 +296,16 @@ function PaperTradingDashboard() {
                         <td>{formatPrice(position.takeProfitBoundary)}</td>
                         <td>{heldLabel}</td>
                         <td>{position.partialTakeProfitTaken ? <span className="badge positive">🌙 Moon Bag</span> : <span className="badge neutral">Running</span>}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="table-action"
+                            onClick={() => closePosition(position.productId)}
+                            disabled={closingId === position.productId || closingId === 'ALL'}
+                          >
+                            {closingId === position.productId ? 'Closing' : 'Close'}
+                          </button>
+                        </td>
                       </tr>
                     )
                   })}
