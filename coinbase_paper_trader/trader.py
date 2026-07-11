@@ -92,6 +92,16 @@ ORB_BREAKOUT_BUFFER_PCT = float(os.environ.get("ORB_BREAKOUT_BUFFER_PCT", "0.10"
 ORB_MAX_OVEREXTENSION   = float(os.environ.get("ORB_MAX_OVEREXTENSION", "1.50"))
 ORB_VOL_RATIO_MIN       = float(os.environ.get("ORB_VOL_RATIO_MIN", "1.50"))
 
+# Breakout execution guard: prefer buying the retest of support rather than the
+# first expansion candle. This keeps entries near the range high / new support
+# and places the initial stop under structure instead of near the breakout wick.
+RETEST_ENTRY_REQUIRED   = os.environ.get("RETEST_ENTRY_REQUIRED", "true").lower() == "true"
+RETEST_BUY_ZONE_PCT     = float(os.environ.get("RETEST_BUY_ZONE_PCT", "0.45"))
+RETEST_ACCEPT_BUFFER_PCT = float(os.environ.get("RETEST_ACCEPT_BUFFER_PCT", "0.10"))
+RETEST_STOP_BUFFER_PCT  = float(os.environ.get("RETEST_STOP_BUFFER_PCT", "0.35"))
+RETEST_SCORE_BONUS      = float(os.environ.get("RETEST_SCORE_BONUS", "8.0"))
+MAX_STRUCTURAL_STOP_PCT = float(os.environ.get("MAX_STRUCTURAL_STOP_PCT", "3.8"))
+
 # Bollinger mean-reversion entries. The bot only opens long positions, so lower
 # band snapback setups are buyable; upper band extensions are recorded as a
 # bearish/unsupported reversal signal and are not used for long entries.
@@ -204,7 +214,7 @@ CONSENSUS_DUAL_BONUS            = float(os.environ.get("CONSENSUS_DUAL_BONUS",  
 CONSENSUS_TRIPLE_BONUS          = float(os.environ.get("CONSENSUS_TRIPLE_BONUS",          "15"))  # +15 pts when 3+ strategies agree
 
 TAKE_PROFIT_PERCENT   = float(os.environ.get("TAKE_PROFIT_PERCENT",  "15.0")) # legacy/default first target
-NORMAL_TAKE_PROFIT_PERCENT = float(os.environ.get("NORMAL_TAKE_PROFIT_PERCENT", "8.0"))
+NORMAL_TAKE_PROFIT_PERCENT = float(os.environ.get("NORMAL_TAKE_PROFIT_PERCENT", "12.0"))
 RUNNER_TAKE_PROFIT_PERCENT = float(os.environ.get("RUNNER_TAKE_PROFIT_PERCENT", "18.0"))
 WEDGE_TAKE_PROFIT_PERCENT = float(os.environ.get("WEDGE_TAKE_PROFIT_PERCENT", "20.0"))
 HIGH_CONSENSUS_TAKE_PROFIT_PERCENT = float(os.environ.get("HIGH_CONSENSUS_TAKE_PROFIT_PERCENT", "15.0"))
@@ -214,8 +224,8 @@ TRAILING_PERCENT      = float(os.environ.get("TRAILING_PERCENT",     "5.0"))  # 
 MOON_BAG_PERCENT      = max(0.0, min(100.0, float(os.environ.get("MOON_BAG_PERCENT", "30.0"))))
 TAKE_PROFIT_SELL_PERCENT = 100.0 - MOON_BAG_PERCENT
 QUICK_TAKE_PROFIT_ENABLED = os.environ.get("QUICK_TAKE_PROFIT_ENABLED", "true").lower() == "true"
-QUICK_TAKE_PROFIT_PERCENT = float(os.environ.get("QUICK_TAKE_PROFIT_PERCENT", "2.5"))
-QUICK_TAKE_PROFIT_SELL_PERCENT = max(0.0, min(100.0, float(os.environ.get("QUICK_TAKE_PROFIT_SELL_PERCENT", "50"))))
+QUICK_TAKE_PROFIT_PERCENT = float(os.environ.get("QUICK_TAKE_PROFIT_PERCENT", "4.0"))
+QUICK_TAKE_PROFIT_SELL_PERCENT = max(0.0, min(100.0, float(os.environ.get("QUICK_TAKE_PROFIT_SELL_PERCENT", "25"))))
 LOOP_INTERVAL_SECONDS = 300     # 5-minute loop
 
 # Dynamic trailing stop. A flat 5% trail shakes you out of big runners on the
@@ -269,13 +279,14 @@ BEARISH_REVERSAL_MIN_CONFIRMATIONS = int(os.environ.get("BEARISH_REVERSAL_MIN_CO
 # Exit quality controls. Without these, a noisy 5m bearish pattern can close a
 # $1000 position for only a few dollars before the setup has room to work.
 BREAKEVEN_STOP_ENABLED = os.environ.get("BREAKEVEN_STOP_ENABLED", "true").lower() == "true"
-BREAKEVEN_TRIGGER_PCT  = float(os.environ.get("BREAKEVEN_TRIGGER_PCT", "1.2"))
+BREAKEVEN_TRIGGER_PCT  = float(os.environ.get("BREAKEVEN_TRIGGER_PCT", "2.0"))
 BREAKEVEN_BUFFER_PCT   = float(os.environ.get("BREAKEVEN_BUFFER_PCT", "0.15"))
 BEARISH_EXIT_MIN_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_MIN_PROFIT_PCT", "3.0"))
 BEARISH_EXIT_MAX_LOSS_PCT   = float(os.environ.get("BEARISH_EXIT_MAX_LOSS_PCT", "-0.75"))
 BEARISH_EXIT_SEVERE_MIN_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_SEVERE_MIN_PROFIT_PCT", "8.0"))
-BEARISH_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("BEARISH_EXIT_MIN_HOLD_MINUTES", "90"))
+BEARISH_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("BEARISH_EXIT_MIN_HOLD_MINUTES", "150"))
 BEARISH_EXIT_STALL_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_STALL_PROFIT_PCT", "0.75"))
+POST_TP_BEARISH_EXIT_MIN_GAIN_PCT = float(os.environ.get("POST_TP_BEARISH_EXIT_MIN_GAIN_PCT", "6.0"))
 
 # Periodic Discord performance summary (total P/L, gain/loss, coins bought).
 SUMMARY_INTERVAL_HOURS = float(os.environ.get("SUMMARY_INTERVAL_HOURS", "6"))
@@ -927,6 +938,79 @@ def recent_dollar_volume(candles: list[list], window: int = RECENT_LIQUIDITY_WIN
     return sum(float(c[4] or 0.0) * float(c[5] or 0.0) for c in selected)
 
 
+def analyze_breakout_retest(
+    candles: list[list],
+    breakout_idx: int,
+    breakout_level: float,
+    support_floor: float,
+) -> dict:
+    """
+    Evaluates whether a breakout has retested prior resistance and held.
+    Returns structural levels plus an execution-ready buy zone and stop anchor.
+    """
+    if breakout_level <= 0 or support_floor <= 0 or breakout_idx < 0 or breakout_idx >= len(candles):
+        return {}
+
+    latest_close = float(candles[-1][4] or 0.0)
+    if latest_close <= 0:
+        return {}
+
+    buy_zone_low = breakout_level * (1 - RETEST_BUY_ZONE_PCT / 100.0)
+    buy_zone_high = breakout_level * (1 + RETEST_BUY_ZONE_PCT / 100.0)
+    acceptance_floor = breakout_level * (1 - RETEST_ACCEPT_BUFFER_PCT / 100.0)
+    structural_stop = support_floor * (1 - RETEST_STOP_BUFFER_PCT / 100.0)
+
+    retest_touched = False
+    retest_holding = False
+    retest_low = 0.0
+    retest_close = 0.0
+    retest_age = len(candles)
+    invalidated = False
+
+    for idx in range(breakout_idx + 1, len(candles)):
+        low = float(candles[idx][1] or 0.0)
+        high = float(candles[idx][2] or 0.0)
+        close = float(candles[idx][4] or 0.0)
+        if low <= 0 or high <= 0 or close <= 0:
+            continue
+
+        if low < structural_stop:
+            invalidated = True
+
+        touched_zone = low <= buy_zone_high and high >= buy_zone_low
+        if touched_zone and not retest_touched:
+            retest_touched = True
+            retest_low = low
+            retest_close = close
+            retest_age = len(candles) - 1 - idx
+            retest_holding = close >= acceptance_floor and low >= structural_stop
+
+    in_buy_zone = buy_zone_low <= latest_close <= buy_zone_high
+    accepted_above_level = latest_close >= acceptance_floor
+    successful_retest = retest_touched and retest_holding and accepted_above_level and not invalidated
+    stop_distance_pct = ((latest_close - structural_stop) / latest_close * 100) if latest_close > structural_stop else 999.0
+
+    return {
+        "support_level": breakout_level,
+        "support_floor": support_floor,
+        "resistance_level": breakout_level,
+        "buy_zone_low": round(buy_zone_low, 8),
+        "buy_zone_high": round(buy_zone_high, 8),
+        "latest_close": round(latest_close, 8),
+        "accepted_above_level": accepted_above_level,
+        "retest_touched": retest_touched,
+        "retest_holding": retest_holding,
+        "successful_retest": successful_retest,
+        "retest_age_candles": retest_age if retest_touched else None,
+        "retest_low": round(retest_low, 8) if retest_low else 0.0,
+        "retest_close": round(retest_close, 8) if retest_close else 0.0,
+        "invalidated_below_support": invalidated,
+        "entry_in_buy_zone": in_buy_zone,
+        "structural_stop": round(structural_stop, 8),
+        "structural_stop_distance_pct": round(stop_distance_pct, 3),
+    }
+
+
 def detect_breakout_pattern(product_id: str, candles: list[list] | None = None) -> dict:
     """
     Detects a pre/early breakout setup from OHLCV candles and scores it 0-100.
@@ -1012,6 +1096,10 @@ def detect_breakout_pattern(product_id: str, candles: list[list] | None = None) 
         "candle_move_pct": round(move_pct, 3),
         "overextension_pct": round(overextension_pct, 3),
         "base_high": base_high,
+        "base_low": base_low,
+        "support_level": base_high,
+        "support_floor": base_low,
+        "resistance_level": base_high,
         # FVG anchors: the open is the FVG low (stop anchor), close is FVG high
         "trigger_candle_open": l_open,
         "trigger_candle_close": l_close,
@@ -1040,8 +1128,15 @@ def detect_recent_breakout_pattern(product_id: str, candles: list[list] | None =
             break
         result = detect_breakout_pattern(product_id, candles[:end])
         score = max(0.0, result["pattern_score"] - (age * 8.0))
+        features = dict(result.get("features", {}))
+        breakout_level = float(features.get("base_high", 0.0) or 0.0)
+        support_floor = float(features.get("base_low", 0.0) or 0.0)
+        retest = analyze_breakout_retest(candles, end - 1, breakout_level, support_floor)
+        if retest:
+            features.update(retest)
+            if retest.get("successful_retest"):
+                score += RETEST_SCORE_BONUS
         if score > best["pattern_score"]:
-            features = dict(result.get("features", {}))
             features["trigger_age_candles"] = age
             best = {"pattern_score": round(score, 1), "features": features}
     return best
@@ -1142,22 +1237,31 @@ def detect_orb_signal(product_id: str, candles: list[list] | None = None) -> dic
         score = max(0.0, score - (age * 8.0))
 
         if score > best["orb_score"]:
+            retest = analyze_breakout_retest(candles, len(candles) - 1 - age, range_high, range_low)
+            features = {
+                "strategy": "ORB_LONG_BREAKOUT" if bullish_breakout else "ORB_NO_LONG_TRIGGER",
+                "session_start_utc": datetime.fromtimestamp(session_start, timezone.utc).isoformat(),
+                "range_minutes": ORB_RANGE_MINUTES,
+                "range_high": range_high,
+                "range_low": range_low,
+                "range_width_pct": round(range_width_pct, 3),
+                "close_above_range_pct": round(close_buffer_pct, 3),
+                "downside_break_pct": round(downside_break, 3),
+                "volume_ratio": round(volume_ratio, 2),
+                "candle_move_pct": round(candle_move_pct, 3),
+                "orb_breakout_dollar_volume": round(close * volume, 2),
+                "trigger_age_candles": age,
+                "support_level": range_high,
+                "support_floor": range_low,
+                "resistance_level": range_high,
+            }
+            if retest:
+                features.update(retest)
+                if retest.get("successful_retest"):
+                    score += RETEST_SCORE_BONUS
             best = {
                 "orb_score": round(min(score, 100.0), 1),
-                "features": {
-                    "strategy": "ORB_LONG_BREAKOUT" if bullish_breakout else "ORB_NO_LONG_TRIGGER",
-                    "session_start_utc": datetime.fromtimestamp(session_start, timezone.utc).isoformat(),
-                    "range_minutes": ORB_RANGE_MINUTES,
-                    "range_high": range_high,
-                    "range_low": range_low,
-                    "range_width_pct": round(range_width_pct, 3),
-                    "close_above_range_pct": round(close_buffer_pct, 3),
-                    "downside_break_pct": round(downside_break, 3),
-                    "volume_ratio": round(volume_ratio, 2),
-                    "candle_move_pct": round(candle_move_pct, 3),
-                    "orb_breakout_dollar_volume": round(close * volume, 2),
-                    "trigger_age_candles": age,
-                },
+                "features": features,
             }
     return best
 
@@ -1710,6 +1814,62 @@ def obv_filter_result(product_data: dict) -> dict:
     if up_ratio < MIN_OBV_UP_VOLUME_RATIO:
         return {"ok": False, "reason": f"OBV up-volume ratio {up_ratio:.2f} < {MIN_OBV_UP_VOLUME_RATIO:.2f}", "metrics": metrics}
     return {"ok": True, "reason": "OBV accumulation OK", "metrics": metrics}
+
+
+def structure_filter_result(product_data: dict, signal: dict) -> dict:
+    """
+    Returns whether the current price location is structurally sound for a long
+    breakout entry. This is intentionally strict only for breakout-style trades.
+    """
+    strategy = signal.get("strategy", "")
+    if strategy not in {"CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT"}:
+        return {"ok": True, "reason": "structure not required", "features": {}}
+
+    features = signal.get("features", {}) or {}
+    price = float(product_data.get("price", 0.0) or 0.0)
+    support_level = float(features.get("support_level", 0.0) or 0.0)
+    support_floor = float(features.get("support_floor", 0.0) or 0.0)
+    buy_zone_low = float(features.get("buy_zone_low", 0.0) or 0.0)
+    buy_zone_high = float(features.get("buy_zone_high", 0.0) or 0.0)
+    structural_stop = float(features.get("structural_stop", 0.0) or 0.0)
+    stop_distance_pct = float(features.get("structural_stop_distance_pct", 999.0) or 999.0)
+    successful_retest = bool(features.get("successful_retest"))
+    accepted_above_level = bool(features.get("accepted_above_level"))
+    entry_in_buy_zone = bool(features.get("entry_in_buy_zone")) or (
+        buy_zone_low > 0 and buy_zone_high > 0 and buy_zone_low <= price <= buy_zone_high
+    )
+
+    if price <= 0 or support_level <= 0 or support_floor <= 0:
+        return {"ok": False, "reason": "missing support/resistance structure", "features": features}
+    if RETEST_ENTRY_REQUIRED and not successful_retest:
+        return {"ok": False, "reason": "breakout has not retested and held support yet", "features": features}
+    if not accepted_above_level:
+        return {"ok": False, "reason": "price has not reclaimed support after retest", "features": features}
+    if not entry_in_buy_zone:
+        return {
+            "ok": False,
+            "reason": f"price ${price:,.6g} is away from buy zone ${buy_zone_low:,.6g}-${buy_zone_high:,.6g}",
+            "features": features,
+        }
+    if structural_stop <= 0 or structural_stop >= price:
+        return {"ok": False, "reason": "support-based stop is invalid for this setup", "features": features}
+    if stop_distance_pct > MAX_STRUCTURAL_STOP_PCT:
+        return {
+            "ok": False,
+            "reason": f"support stop distance {stop_distance_pct:.2f}% > {MAX_STRUCTURAL_STOP_PCT:.2f}%",
+            "features": features,
+        }
+    return {
+        "ok": True,
+        "reason": "retest held near support",
+        "features": features,
+        "buy_zone_low": buy_zone_low,
+        "buy_zone_high": buy_zone_high,
+        "support_level": support_level,
+        "support_floor": support_floor,
+        "stop_loss": structural_stop,
+        "stop_distance_pct": stop_distance_pct,
+    }
 
 
 def detect_bearish_reversal(product_id: str, candles: list[list] | None = None) -> dict:
@@ -2294,20 +2454,23 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
         signal = select_entry_signal(prod)
         liquidity = liquidity_filter_result(prod)
         obv = obv_filter_result(prod)
+        structure = structure_filter_result(prod, signal)
 
         reasons: list[str] = []
         if not liquidity["ok"]:
             reasons.append(liquidity["reason"])
         if not obv["ok"]:
             reasons.append(obv["reason"])
+        if not structure["ok"]:
+            reasons.append(structure["reason"])
         if not signal["eligible"]:
             reasons.append(
                 f"{signal['strategy']} score {signal['score']:.0f} below buy threshold"
             )
 
-        eligible = signal["eligible"] and liquidity["ok"] and obv["ok"]
+        eligible = signal["eligible"] and liquidity["ok"] and obv["ok"] and structure["ok"]
         liquidity_ok = liquidity["ok"]
-        stop_loss = price * (1 - TRAILING_PERCENT / 100)
+        stop_loss = float(structure.get("stop_loss", 0.0) or 0.0) if structure["ok"] else price * (1 - TRAILING_PERCENT / 100)
         target_pct, target_reason = _take_profit_percent_for_signal(signal)
         target1 = price * (1 + target_pct / 100)
         target2 = price * (1 + (target_pct * 2) / 100)
@@ -2337,8 +2500,10 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "price_change_1h": round(float(prod.get("price_change_1h", 0.0) or 0.0), 2),
             "dollar_volume_24h": round(float(liquidity.get("dollar_volume_24h", 0.0) or 0.0), 2),
             "obv_pressure_pct": round(float(obv.get("metrics", {}).get("obv_pressure_pct", 0.0) or 0.0), 2),
-            "buy_range_low": round(price, 6),
-            "buy_range_high": round(price * 1.005, 6),
+            "buy_range_low": round(float(structure.get("buy_zone_low", price) or price), 6),
+            "buy_range_high": round(float(structure.get("buy_zone_high", price * 1.005) or (price * 1.005)), 6),
+            "support_level": round(float(structure.get("support_level", 0.0) or 0.0), 6),
+            "support_floor": round(float(structure.get("support_floor", 0.0) or 0.0), 6),
             "stop_loss": round(stop_loss, 6),
             "target1": round(target1, 6),
             "target2": round(target2, 6),
@@ -2495,6 +2660,12 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             print(f"  [OBV SKIP] {product_id}: {obv['reason']}")
             continue
 
+        signal = select_entry_signal(prod)
+        structure = structure_filter_result(prod, signal)
+        if not structure["ok"]:
+            print(f"  [STRUCTURE SKIP] {product_id}: {structure['reason']}")
+            continue
+
         if MARKET_REGIME_FILTER and product_id != "BTC-USD":
             coin_1h = float(prod.get("price_change_1h", 0.0) or 0.0)
             btc_1h = float(market_context.get("btc_1h_change", 0.0) or 0.0)
@@ -2502,8 +2673,6 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             if rel_strength < MIN_REL_STRENGTH_VS_BTC:
                 print(f"  [RS SKIP] {product_id}: 1h {coin_1h:+.2f}% vs BTC {btc_1h:+.2f}% (RS {rel_strength:+.2f}% < {MIN_REL_STRENGTH_VS_BTC:.2f}%)")
                 continue
-
-        signal = select_entry_signal(prod)
         if signal["eligible"]:
             # Multi-timeframe confirmation: the 5m trigger must hold up on 15m/1h
             # and not contradict the 4h trend. Only runs for triggered coins, so
@@ -2542,22 +2711,22 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 continue
 
             crypto_qty         = position_size / price
-            # FVG-aware initial stop: anchor to the breakout candle's OPEN (the FVG low).
-            # If price returns below the open of the breakout candle the Fair Value Gap
-            # is filled and the trade is structurally invalidated — a far tighter and more
-            # meaningful stop than a flat %-from-close. Falls back to the flat trailing %
-            # when no candle-open data is available (e.g. ORB/Bollinger entries).
-            _sig_feats      = signal.get("features", {}) or {}
+            _sig_feats = signal.get("features", {}) or {}
             _fvg_candle_open = float(_sig_feats.get("trigger_candle_open", 0.0) or 0.0)
-            if _fvg_candle_open > 0 and _fvg_candle_open < price:
-                # 0.3% buffer below the FVG low so normal noise doesn't stop us out
-                fvg_stop        = _fvg_candle_open * (1 - 0.003)
-                flat_stop       = price * (1 - TRAILING_PERCENT / 100)
-                initial_stop    = max(fvg_stop, flat_stop)  # never worse than the flat stop
-                _stop_method    = f"FVG (candle open ${_fvg_candle_open:,.6g})"
+            if structure.get("ok") and float(structure.get("stop_loss", 0.0) or 0.0) > 0:
+                initial_stop = float(structure["stop_loss"])
+                _stop_method = (
+                    f"support retest ${float(structure.get('support_level', 0.0) or 0.0):,.6g} "
+                    f"/ floor ${float(structure.get('support_floor', 0.0) or 0.0):,.6g}"
+                )
+            elif _fvg_candle_open > 0 and _fvg_candle_open < price:
+                fvg_stop = _fvg_candle_open * (1 - 0.003)
+                flat_stop = price * (1 - TRAILING_PERCENT / 100)
+                initial_stop = max(fvg_stop, flat_stop)
+                _stop_method = f"FVG (candle open ${_fvg_candle_open:,.6g})"
             else:
-                initial_stop    = price * (1 - TRAILING_PERCENT / 100)
-                _stop_method    = f"flat {TRAILING_PERCENT:.1f}%"
+                initial_stop = price * (1 - TRAILING_PERCENT / 100)
+                _stop_method = f"flat {TRAILING_PERCENT:.1f}%"
             main_tp_pct, main_tp_reason = _take_profit_percent_for_signal(signal)
             take_profit_target = price * (1 + main_tp_pct / 100)
             mode_label         = "LIVE BUY" if LIVE_ORDERS_ACTIVE else "PAPER BUY"
@@ -2628,6 +2797,11 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             active_positions[product_id]["obv"] = obv.get("metrics", {})
             active_positions[product_id]["initial_stop_method"] = _stop_method
             active_positions[product_id]["fvg_candle_open"] = _fvg_candle_open
+            active_positions[product_id]["entry_buy_zone_low"] = float(structure.get("buy_zone_low", 0.0) or 0.0)
+            active_positions[product_id]["entry_buy_zone_high"] = float(structure.get("buy_zone_high", 0.0) or 0.0)
+            active_positions[product_id]["entry_support_level"] = float(structure.get("support_level", 0.0) or 0.0)
+            active_positions[product_id]["entry_support_floor"] = float(structure.get("support_floor", 0.0) or 0.0)
+            active_positions[product_id]["entry_stop_distance_pct"] = float(structure.get("stop_distance_pct", 0.0) or 0.0)
 
             confirming_strategies = signal.get("confirming_strategies", [signal["strategy"]])
             confidence_label = signal.get("confidence_level", "SINGLE")
@@ -2725,6 +2899,28 @@ def _position_held_minutes(pos: dict) -> int:
         return 0
 
 
+def _entry_review_snapshot(pos: dict) -> dict:
+    """Captures entry context so closed-trade review can explain why a trade failed."""
+    return {
+        "entry_strategy": pos.get("entry_strategy", "unknown"),
+        "entry_strategy_score": float(pos.get("entry_strategy_score", pos.get("signal_score", 0.0)) or 0.0),
+        "entry_confidence_level": pos.get("entry_confidence_level", "SINGLE"),
+        "entry_consensus_count": int(pos.get("entry_consensus_count", 0) or 0),
+        "entry_confirming_strategies": pos.get("entry_confirming_strategies", []),
+        "initial_stop_method": pos.get("initial_stop_method", ""),
+        "entry_buy_zone_low": float(pos.get("entry_buy_zone_low", 0.0) or 0.0),
+        "entry_buy_zone_high": float(pos.get("entry_buy_zone_high", 0.0) or 0.0),
+        "entry_support_level": float(pos.get("entry_support_level", 0.0) or 0.0),
+        "entry_support_floor": float(pos.get("entry_support_floor", 0.0) or 0.0),
+        "entry_stop_distance_pct": float(pos.get("entry_stop_distance_pct", 0.0) or 0.0),
+        "entry_pre_breakout_score": float(pos.get("pre_breakout_score", 0.0) or 0.0),
+        "entry_orb_score": float(pos.get("orb_score", 0.0) or 0.0),
+        "entry_bollinger_score": float(pos.get("bollinger_score", 0.0) or 0.0),
+        "entry_wedge_score": float(pos.get("wedge_score", 0.0) or 0.0),
+        "entry_momentum_runner_score": float(pos.get("momentum_runner_score", 0.0) or 0.0),
+    }
+
+
 def _should_exit_on_bearish_reversal(pos: dict, current_price: float, reversal: dict) -> tuple[bool, str]:
     """
     Filters noisy bearish-reversal exits. The bot should not close promising
@@ -2737,7 +2933,16 @@ def _should_exit_on_bearish_reversal(pos: dict, current_price: float, reversal: 
     confirmations = int(reversal.get("confirmation_count", 0) or 0)
 
     if pos.get("partial_take_profit_taken"):
-        return True, "moon bag has already paid; protect runner"
+        if severe:
+            return True, "severe reversal after partial take-profit"
+        if profit_pct <= POST_TP_BEARISH_EXIT_MIN_GAIN_PCT:
+            return True, (
+                f"post-TP runner faded to {profit_pct:+.2f}% <= "
+                f"{POST_TP_BEARISH_EXIT_MIN_GAIN_PCT:+.2f}%"
+            )
+        return False, (
+            f"moon bag still healthy at {profit_pct:+.2f}% after partial take-profit"
+        )
     if profit_pct <= BEARISH_EXIT_MAX_LOSS_PCT:
         return True, f"loss {profit_pct:+.2f}% <= {BEARISH_EXIT_MAX_LOSS_PCT:+.2f}%"
     if severe and profit_pct >= BEARISH_EXIT_SEVERE_MIN_PROFIT_PCT:
@@ -2942,6 +3147,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                         "pnl_percentage": pnl_pct,
                         "status":         "PARTIAL",
                     },
+                    "entry_review": _entry_review_snapshot(pos),
                 }
                 history.append(trade_record)
                 record_daily_pnl(daily_ledger, product_id, pnl_usd)
@@ -3033,6 +3239,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                         "pnl_percentage": pnl_pct,
                         "status":         "PARTIAL",
                     },
+                    "entry_review": _entry_review_snapshot(pos),
                 }
                 history.append(trade_record)
                 record_daily_pnl(daily_ledger, product_id, pnl_usd)
@@ -3125,6 +3332,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                     "pnl_percentage": pnl_pct,
                     "status":         "CLOSED",
                 },
+                "entry_review": _entry_review_snapshot(pos),
             }
 
             history.append(trade_record)
@@ -3300,6 +3508,66 @@ def build_portfolio_summary(active_positions: dict, history: list, live_prices: 
     return "\n".join(lines)
 
 
+def build_trade_review_report(active_positions: dict, history: list) -> str:
+    """Builds a compact diagnostic report focused on entry quality and stop behavior."""
+    lines = [
+        "Trade Review",
+        f"Generated: {_utcnow_iso()}",
+    ]
+
+    closed = [
+        t for t in history
+        if isinstance(t, dict) and t.get("performance", {}).get("status") == "CLOSED"
+    ]
+    if closed:
+        total = len(closed)
+        wins = sum(1 for t in closed if float(t.get("performance", {}).get("pnl_usd", 0.0) or 0.0) > 0)
+        stopouts = [t for t in closed if "TRAILING_STOP" in str(t.get("exit", {}).get("reason", ""))]
+        bearish = [t for t in closed if "BEARISH_REVERSAL" in str(t.get("exit", {}).get("reason", ""))]
+        avg_pnl = sum(float(t.get("performance", {}).get("pnl_percentage", 0.0) or 0.0) for t in closed) / max(1, total)
+        avg_stop_distance = sum(
+            float((t.get("entry_review", {}) or {}).get("entry_stop_distance_pct", 0.0) or 0.0)
+            for t in closed
+        ) / max(1, len([t for t in closed if (t.get("entry_review", {}) or {}).get("entry_stop_distance_pct")]))
+        lines.extend([
+            f"Closed trades: {total} | wins {wins} | losses {total - wins} | avg pnl {avg_pnl:+.2f}%",
+            f"Exit mix: trailing stops {len(stopouts)} | bearish reversals {len(bearish)}",
+            f"Average recorded stop distance: {avg_stop_distance:.2f}%",
+        ])
+    else:
+        lines.append("Closed trades: none recorded yet in trading_history.json")
+
+    if active_positions:
+        lines.append(f"Open positions: {len(active_positions)}")
+        for pid, pos in active_positions.items():
+            entry = float(pos.get("entry_price", 0.0) or 0.0)
+            stop = float(pos.get("current_trailing_stop", 0.0) or 0.0)
+            stop_pct = ((entry - stop) / entry * 100) if entry and stop else 0.0
+            strategy = pos.get("entry_strategy", "legacy/unknown")
+            score = float(pos.get("entry_strategy_score", pos.get("signal_score", 0.0)) or 0.0)
+            support = float(pos.get("entry_support_level", 0.0) or 0.0)
+            lines.append(
+                f"- {pid}: strategy {strategy}, score {score:.0f}, stop {stop_pct:.2f}% below entry"
+                + (f", support {support:.6g}" if support > 0 else ", legacy entry without recorded structure")
+            )
+    else:
+        lines.append("Open positions: none")
+
+    legacy_tight = [
+        pid for pid, pos in active_positions.items()
+        if float(pos.get("entry_support_level", 0.0) or 0.0) <= 0
+        and float(pos.get("entry_price", 0.0) or 0.0) > 0
+        and float(pos.get("current_trailing_stop", 0.0) or 0.0) > 0
+        and ((float(pos.get("entry_price", 0.0) or 0.0) - float(pos.get("current_trailing_stop", 0.0) or 0.0))
+             / float(pos.get("entry_price", 1.0) or 1.0) * 100) <= 2.25
+    ]
+    if legacy_tight:
+        lines.append("Likely issue: legacy breakout entries used very tight stops without saved support structure.")
+        lines.append("Affected open positions: " + ", ".join(legacy_tight))
+
+    return "\n".join(lines)
+
+
 def maybe_send_summary(active_positions: dict, live_prices: dict, force: bool = False):
     """Sends the performance summary to Discord every SUMMARY_INTERVAL_HOURS."""
     state = load_json_file(SUMMARY_STATE_FILE)
@@ -3467,13 +3735,30 @@ def run_once():
     print("\n" + build_portfolio_summary(active_positions, history, live_prices, since))
 
 
+def run_review():
+    """Prints a local diagnostic review from archived history + open positions."""
+    active_positions = load_json_file(PORTFOLIO_FILE)
+    history = load_json_file(HISTORY_FILE)
+    if not isinstance(active_positions, dict):
+        active_positions = {}
+    if not isinstance(history, list):
+        history = []
+    print("=" * 52)
+    print("  COINBASE PAPER-TRADING — TRADE REVIEW")
+    print("=" * 52)
+    print(build_trade_review_report(active_positions, history))
+
+
 if __name__ == "__main__":
     # `python trader.py scan` — on-demand breakout scan (public data, no keys).
+    # `python trader.py review` — inspect archived trades and open-position stop quality.
     # `python trader.py once` — run exactly one trading cycle, then exit.
     # `python trader.py`      — run the continuous trading loop.
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode == "scan":
         scan_breakouts_now()
+    elif mode == "review":
+        run_review()
     elif mode == "once":
         run_once()
     else:
