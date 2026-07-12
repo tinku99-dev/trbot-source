@@ -342,6 +342,39 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dic
             "history": current_history,
         })
 
+    local_backup_paths: List[str] = []
+    data_dir = str(getattr(trader, "DATA_DIR", "") or "").strip()
+    local_dirs = [data_dir] if data_dir else [os.getcwd()]
+    for directory in local_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        try:
+            for filename in os.listdir(directory):
+                if filename.startswith("trading_history_fresh_start_backup_") and filename.endswith(".json"):
+                    local_backup_paths.append(os.path.join(directory, filename))
+        except OSError as exc:
+            logging.warning("Pattern review local backup scan failed for %s: %s", directory, exc)
+
+    local_backup_paths.sort(
+        key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0,
+        reverse=True,
+    )
+    for path in local_backup_paths[:max_backups]:
+        try:
+            with open(path, "r", encoding="utf-8") as file_handle:
+                history = json.load(file_handle)
+        except Exception as exc:
+            logging.warning("Pattern review local backup load failed for %s: %s", path, exc)
+            continue
+        if isinstance(history, list):
+            sources.append({
+                "name": os.path.basename(path),
+                "kind": "local_backup",
+                "lastModifiedUtc": datetime.fromtimestamp(os.path.getmtime(path), timezone.utc).isoformat(),
+                "tradeCount": len(history),
+                "history": history,
+            })
+
     blob_sources: List[Any] = []
     conn_str = getattr(trader, "_BLOB_CONN_STR", "")
     container_name = getattr(trader, "_BLOB_CONTAINER", STATE_CONTAINER_NAME)
