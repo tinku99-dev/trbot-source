@@ -137,6 +137,14 @@ button:disabled {
   font-size: 13px;
 }
 
+.table-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .alert {
   margin-bottom: 18px;
   padding: 14px 16px;

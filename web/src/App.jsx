@@ -211,6 +211,7 @@ function PaperTradingDashboard() {
 
   const summary = data?.summary || {}
   const openPositions = data?.openPositions || []
+  const pendingEntries = data?.pendingEntries || []
   // Show the complete daily history, newest first. Sort explicitly so the view
   // is independent of the API's ordering.
   const dailyRows = [...(data?.daily || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
@@ -252,10 +253,50 @@ function PaperTradingDashboard() {
         <Metric label="Equity" value={formatCurrency(summary.totalEquityUsd)} tone={pnlClass(summary.totalPnlUsd)} />
         <Metric label="Total Invested" value={formatCurrency(summary.totalInvestedUsd)} />
         <Metric label="Allocated" value={formatCurrency(summary.allocatedUsd)} />
+        <Metric label="Pending" value={summary.pendingEntries ?? pendingEntries.length} />
+        <Metric label="Reserved" value={formatCurrency(summary.pendingReservedUsd)} />
         <Metric label="Open" value={summary.openPositions ?? 0} />
         <Metric label="Closed" value={summary.closedTrades ?? 0} />
         <Metric label="Win Rate" value={formatPercent(summary.winRatePct)} />
       </section>
+
+      {pendingEntries.length > 0 && (
+        <Panel title="Pending Limit Entries" meta={`${pendingEntries.length} waiting for retest`}>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Coin</th>
+                  <th>Limit</th>
+                  <th>Signal</th>
+                  <th>Support</th>
+                  <th>Buy Zone</th>
+                  <th>Reserved</th>
+                  <th>Strategy</th>
+                  <th>Expires</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingEntries.map((entry) => (
+                  <tr key={`${entry.productId}-${entry.createdAtUtc}`}>
+                    <td className="strong">{entry.productId}</td>
+                    <td>{formatPrice(entry.limitPriceUsd)}</td>
+                    <td>{formatPrice(entry.signalPriceUsd)}</td>
+                    <td>{formatPrice(entry.supportLevelUsd)}</td>
+                    <td>{formatPrice(entry.buyZoneLowUsd)} - {formatPrice(entry.buyZoneHighUsd)}</td>
+                    <td>{formatCurrency(entry.allocatedUsd)}</td>
+                    <td>
+                      <span className="badge neutral">{entry.strategy || 'Limit retest'}</span>
+                      <small className="table-note">Score {formatNumber(entry.strategyScore, 0)}</small>
+                    </td>
+                    <td>{formatDateTime(entry.expiresAtUtc)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      )}
 
       <section className="grid-two">
         <Panel title="Open Positions" meta={`${openPositions.length} active`}>
