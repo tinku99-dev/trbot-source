@@ -259,6 +259,63 @@ def close_paper_positions(
     }
 
 
+def fresh_start_paper_trading(trader: Any, archive_open_positions: bool = True) -> Dict[str, Any]:
+    """
+    Resets paper trading to a clean baseline:
+    - optionally archives any currently open paper positions at mark price
+    - snapshots history/ledger into timestamped backup files
+    - clears active positions, realized history, daily ledger, and summary state
+    """
+    reset_result = {
+        "status": "ok",
+        "archivedOpenPositions": 0,
+        "realizedPnlUsd": 0.0,
+    }
+    if archive_open_positions:
+        reset_result = close_paper_positions(
+            trader,
+            archive=True,
+            exit_reason="MANUAL_FRESH_START_CLOSED_AT_MARK",
+            source="Manual fresh start",
+        )
+
+    history = trader.load_json_file(trader.HISTORY_FILE)
+    daily_ledger = trader.load_json_file(trader.DAILY_PNL_FILE)
+    backups_written: List[str] = []
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    if isinstance(history, list) and history:
+        backup_name = f"trading_history_fresh_start_backup_{stamp}.json"
+        trader.save_json_file(backup_name, history)
+        backups_written.append(backup_name)
+    if isinstance(daily_ledger, dict) and (
+        daily_ledger.get("realized") or daily_ledger.get("blocked") or daily_ledger.get("portfolio_stopped")
+    ):
+        backup_name = f"daily_pnl_fresh_start_backup_{stamp}.json"
+        trader.save_json_file(backup_name, daily_ledger)
+        backups_written.append(backup_name)
+
+    trader.save_json_file(trader.PORTFOLIO_FILE, {})
+    trader.save_json_file(trader.HISTORY_FILE, [])
+    trader.save_json_file(
+        trader.DAILY_PNL_FILE,
+        {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "realized": {}, "blocked": []},
+    )
+    trader.save_json_file(trader.SUMMARY_STATE_FILE, {})
+    trader.save_json_file(trader.DAILY_SUMMARY_STATE_FILE, {})
+    trader.save_json_file(trader.MARKET_STATE_FILE, {})
+    trader.save_json_file(trader.SCAN_SNAPSHOT_FILE, {})
+
+    return {
+        "status": "ok",
+        "message": "Paper trading reset to a clean baseline.",
+        "startingCapitalUsd": float(trader.TOTAL_CAPITAL_USD),
+        "archivedOpenPositions": int(reset_result.get("closedPositions", 0) or 0),
+        "realizedPnlUsd": round(float(reset_result.get("realizedPnlUsd", 0.0) or 0.0), 2),
+        "backupFiles": backups_written,
+    }
+
+
 def record_alert(event_type: str, symbol: str, timeframe: str, details: Dict[str, Any]) -> None:
     alerts = load_alert_history()
     alerts.append(
@@ -1440,6 +1497,34 @@ def paper_trading_reset(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("paper_trading_reset failed: %s", exc)
         return func.HttpResponse(
             json.dumps({"error": "reset_failed", "message": str(exc)}),
+            status_code=500,
+            mimetype="application/json",
+        )
+
+
+@app.route(route="paper-trading/fresh-start", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
+def paper_trading_fresh_start(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        import trader
+
+        confirm = (req.params.get("confirm") or "").strip()
+        if confirm != "RESET":
+            return func.HttpResponse(
+                json.dumps({
+                    "error": "confirmation_required",
+                    "message": "POST with ?confirm=RESET to archive any open paper positions, backup history, and reset the paper account to a fresh baseline.",
+                }),
+                status_code=400,
+                mimetype="application/json",
+            )
+
+        archive_open_positions = (req.params.get("archiveOpenPositions") or "true").strip().lower() != "false"
+        result = fresh_start_paper_trading(trader, archive_open_positions=archive_open_positions)
+        return func.HttpResponse(json.dumps(result), status_code=200, mimetype="application/json")
+    except Exception as exc:
+        logging.exception("paper_trading_fresh_start failed: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": "fresh_start_failed", "message": str(exc)}),
             status_code=500,
             mimetype="application/json",
         )
