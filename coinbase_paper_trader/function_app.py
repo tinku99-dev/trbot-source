@@ -328,10 +328,23 @@ def fresh_start_paper_trading(trader: Any, archive_open_positions: bool = True) 
     }
 
 
-def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dict[str, Any]]:
+def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> Dict[str, Any]:
     """Loads current history plus recent history backups for strategy analysis."""
     max_backups = max(0, min(max_backups, 50))
     sources: List[Dict[str, Any]] = []
+    debug: Dict[str, Any] = {
+        "dataDir": str(getattr(trader, "DATA_DIR", "") or ""),
+        "workingDirectory": os.getcwd(),
+        "blobSdkAvailable": BlobServiceClient is not None,
+        "blobConnectionConfigured": bool(getattr(trader, "_BLOB_CONN_STR", "")),
+        "blobContainer": getattr(trader, "_BLOB_CONTAINER", STATE_CONTAINER_NAME),
+        "localDirsScanned": [],
+        "localBackupCount": 0,
+        "blobPrefixesScanned": [],
+        "blobCandidateCount": 0,
+        "blobHistorySourcesLoaded": 0,
+        "blobScanError": "",
+    }
 
     current_history = trader.load_json_file(trader.HISTORY_FILE)
     if isinstance(current_history, list):
@@ -348,6 +361,7 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dic
     for directory in local_dirs:
         if not directory or not os.path.isdir(directory):
             continue
+        debug["localDirsScanned"].append(directory)
         try:
             for filename in os.listdir(directory):
                 if filename.startswith("trading_history_fresh_start_backup_") and filename.endswith(".json"):
@@ -367,6 +381,7 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dic
             logging.warning("Pattern review local backup load failed for %s: %s", path, exc)
             continue
         if isinstance(history, list):
+            debug["localBackupCount"] += 1
             sources.append({
                 "name": os.path.basename(path),
                 "kind": "local_backup",
@@ -385,11 +400,13 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dic
             service_client = BlobServiceClient.from_connection_string(conn_str)
             container = service_client.get_container_client(container_name)
             seen_blob_names = set()
-            for prefix in (
+            prefixes = (
                 "trader-state/trading_history_fresh_start_backup_",
                 f"{backup_prefix}/",
                 "pre-deploy/",
-            ):
+            )
+            debug["blobPrefixesScanned"] = list(prefixes)
+            for prefix in prefixes:
                 for blob in container.list_blobs(name_starts_with=prefix):
                     name = getattr(blob, "name", "")
                     if not name or name in seen_blob_names:
@@ -400,6 +417,7 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dic
                         continue
                     seen_blob_names.add(name)
                     blob_sources.append(blob)
+            debug["blobCandidateCount"] = len(blob_sources)
 
             blob_sources.sort(
                 key=lambda blob: (
@@ -429,14 +447,17 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dic
                         "tradeCount": len(history),
                         "history": history,
                     })
+                    debug["blobHistorySourcesLoaded"] += 1
         except Exception as exc:
+            debug["blobScanError"] = str(exc)
             logging.warning("Pattern review backup scan failed: %s", exc)
 
-    return sources
+    return {"sources": sources, "debug": debug}
 
 
 def build_pattern_review_payload(trader: Any, max_backups: int = 20) -> Dict[str, Any]:
-    sources_with_history = _load_pattern_review_sources(trader, max_backups=max_backups)
+    loaded = _load_pattern_review_sources(trader, max_backups=max_backups)
+    sources_with_history = loaded.get("sources", [])
     combined_history: List[Dict[str, Any]] = []
     sources: List[Dict[str, Any]] = []
     for source in sources_with_history:
@@ -451,6 +472,7 @@ def build_pattern_review_payload(trader: Any, max_backups: int = 20) -> Dict[str
         "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
         "sources": sources,
         "analysis": analysis,
+        "debug": loaded.get("debug", {}),
     }
 
 
