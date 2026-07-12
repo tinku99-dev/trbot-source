@@ -388,12 +388,15 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dic
             for prefix in (
                 "trader-state/trading_history_fresh_start_backup_",
                 f"{backup_prefix}/",
+                "pre-deploy/",
             ):
                 for blob in container.list_blobs(name_starts_with=prefix):
                     name = getattr(blob, "name", "")
                     if not name or name in seen_blob_names:
                         continue
                     if prefix == f"{backup_prefix}/" and "/trading_history.json/" not in name:
+                        continue
+                    if prefix == "pre-deploy/" and not name.endswith("/trading_history.json"):
                         continue
                     seen_blob_names.add(name)
                     blob_sources.append(blob)
