@@ -148,6 +148,17 @@ def build_manual_close_record(
     final_value = quantity * mark_price
     pnl_usd = final_value - allocated
     pnl_pct = (pnl_usd / allocated * 100) if allocated else 0.0
+    try:
+        entry_review = trader._entry_review_snapshot(position)
+    except Exception:
+        entry_review = {
+            "entry_strategy": position.get("entry_strategy", "unknown"),
+            "entry_strategy_score": float(position.get("entry_strategy_score", position.get("signal_score", 0.0)) or 0.0),
+            "entry_confidence_level": position.get("entry_confidence_level", "SINGLE"),
+            "entry_support_level": float(position.get("entry_support_level", 0.0) or 0.0),
+            "entry_support_floor": float(position.get("entry_support_floor", 0.0) or 0.0),
+            "entry_stop_distance_pct": float(position.get("entry_stop_distance_pct", 0.0) or 0.0),
+        }
     return {
         "strategy": "Automated Multi-Asset Watchlist Engine",
         "product_id": product_id,
@@ -174,6 +185,7 @@ def build_manual_close_record(
             "pnl_percentage": pnl_pct,
             "status": "CLOSED",
         },
+        "entry_review": entry_review,
     }
 
 
@@ -313,6 +325,96 @@ def fresh_start_paper_trading(trader: Any, archive_open_positions: bool = True) 
         "archivedOpenPositions": int(reset_result.get("closedPositions", 0) or 0),
         "realizedPnlUsd": round(float(reset_result.get("realizedPnlUsd", 0.0) or 0.0), 2),
         "backupFiles": backups_written,
+    }
+
+
+def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> List[Dict[str, Any]]:
+    """Loads current history plus recent history backups for strategy analysis."""
+    max_backups = max(0, min(max_backups, 50))
+    sources: List[Dict[str, Any]] = []
+
+    current_history = trader.load_json_file(trader.HISTORY_FILE)
+    if isinstance(current_history, list):
+        sources.append({
+            "name": trader.HISTORY_FILE,
+            "kind": "current",
+            "tradeCount": len(current_history),
+            "history": current_history,
+        })
+
+    blob_sources: List[Any] = []
+    conn_str = getattr(trader, "_BLOB_CONN_STR", "")
+    container_name = getattr(trader, "_BLOB_CONTAINER", STATE_CONTAINER_NAME)
+    backup_prefix = getattr(trader, "_STATE_BACKUP_PREFIX", "trader-state-backups")
+
+    if BlobServiceClient and conn_str and max_backups > 0:
+        try:
+            service_client = BlobServiceClient.from_connection_string(conn_str)
+            container = service_client.get_container_client(container_name)
+            seen_blob_names = set()
+            for prefix in (
+                "trader-state/trading_history_fresh_start_backup_",
+                f"{backup_prefix}/",
+            ):
+                for blob in container.list_blobs(name_starts_with=prefix):
+                    name = getattr(blob, "name", "")
+                    if not name or name in seen_blob_names:
+                        continue
+                    if prefix == f"{backup_prefix}/" and "/trading_history.json/" not in name:
+                        continue
+                    seen_blob_names.add(name)
+                    blob_sources.append(blob)
+
+            blob_sources.sort(
+                key=lambda blob: (
+                    getattr(blob, "last_modified", None) or datetime.min.replace(tzinfo=timezone.utc),
+                    getattr(blob, "name", ""),
+                ),
+                reverse=True,
+            )
+
+            for blob in blob_sources[:max_backups]:
+                blob_name = getattr(blob, "name", "")
+                try:
+                    payload = container.get_blob_client(blob_name).download_blob().readall().decode("utf-8")
+                    history = json.loads(payload)
+                except Exception as exc:
+                    logging.warning("Pattern review backup load failed for %s: %s", blob_name, exc)
+                    continue
+                if isinstance(history, list):
+                    sources.append({
+                        "name": blob_name,
+                        "kind": "backup",
+                        "lastModifiedUtc": (
+                            getattr(blob, "last_modified", None).isoformat()
+                            if getattr(blob, "last_modified", None)
+                            else ""
+                        ),
+                        "tradeCount": len(history),
+                        "history": history,
+                    })
+        except Exception as exc:
+            logging.warning("Pattern review backup scan failed: %s", exc)
+
+    return sources
+
+
+def build_pattern_review_payload(trader: Any, max_backups: int = 20) -> Dict[str, Any]:
+    sources_with_history = _load_pattern_review_sources(trader, max_backups=max_backups)
+    combined_history: List[Dict[str, Any]] = []
+    sources: List[Dict[str, Any]] = []
+    for source in sources_with_history:
+        history = source.get("history")
+        if isinstance(history, list):
+            combined_history.extend([item for item in history if isinstance(item, dict)])
+        clean_source = {key: value for key, value in source.items() if key != "history"}
+        sources.append(clean_source)
+
+    analysis = trader.summarize_trade_patterns(combined_history)
+    return {
+        "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
+        "sources": sources,
+        "analysis": analysis,
     }
 
 
@@ -1460,6 +1562,26 @@ def paper_trading_close(req: func.HttpRequest) -> func.HttpResponse:
         logging.exception("paper_trading_close failed: %s", exc)
         return func.HttpResponse(
             json.dumps({"error": "close_failed", "message": str(exc)}),
+            status_code=500,
+            mimetype="application/json",
+        )
+
+
+@app.route(route="paper-trading/pattern-review", methods=["GET"], auth_level=func.AuthLevel.FUNCTION)
+def paper_trading_pattern_review(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        import trader
+
+        try:
+            max_backups = int(req.params.get("maxBackups") or "20")
+        except ValueError:
+            max_backups = 20
+        payload = build_pattern_review_payload(trader, max_backups=max_backups)
+        return func.HttpResponse(json.dumps(payload), status_code=200, mimetype="application/json")
+    except Exception as exc:
+        logging.exception("paper_trading_pattern_review failed: %s", exc)
+        return func.HttpResponse(
+            json.dumps({"error": "pattern_review_failed", "message": str(exc)}),
             status_code=500,
             mimetype="application/json",
         )

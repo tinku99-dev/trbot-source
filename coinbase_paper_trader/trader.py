@@ -212,6 +212,11 @@ CONSENSUS_AGREEING_THRESHOLD    = float(os.environ.get("CONSENSUS_AGREEING_THRES
 CONSENSUS_SINGLE_THRESHOLD_BUMP = float(os.environ.get("CONSENSUS_SINGLE_THRESHOLD_BUMP", "5"))   # lone signal needs +5 above normal threshold
 CONSENSUS_DUAL_BONUS            = float(os.environ.get("CONSENSUS_DUAL_BONUS",            "8"))   # +8 pts when 2 strategies agree
 CONSENSUS_TRIPLE_BONUS          = float(os.environ.get("CONSENSUS_TRIPLE_BONUS",          "15"))  # +15 pts when 3+ strategies agree
+ENABLED_ENTRY_STRATEGIES = {
+    item.strip().upper().replace("-", "_").replace(" ", "_")
+    for item in os.environ.get("ENABLED_ENTRY_STRATEGIES", "").split(",")
+    if item.strip()
+}
 
 TAKE_PROFIT_PERCENT   = float(os.environ.get("TAKE_PROFIT_PERCENT",  "15.0")) # legacy/default first target
 NORMAL_TAKE_PROFIT_PERCENT = float(os.environ.get("NORMAL_TAKE_PROFIT_PERCENT", "12.0"))
@@ -802,6 +807,40 @@ def compute_signal_score(price_change_24h: float, volume_change_24h: float) -> f
     # >20% swing = 0 pts
 
     return round(score, 1)
+
+
+def normalize_entry_strategy_name(value: str) -> str:
+    """Returns a stable strategy label for reporting and optional filtering."""
+    name = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "BREAKOUT": "CANDLE_BREAKOUT",
+        "CANDLE": "CANDLE_BREAKOUT",
+        "PRE_BREAKOUT": "CANDLE_BREAKOUT",
+        "CANDLE_BREAKOUT": "CANDLE_BREAKOUT",
+        "ORB": "OPENING_RANGE_BREAKOUT",
+        "ORB_BREAKOUT": "OPENING_RANGE_BREAKOUT",
+        "OPENING_RANGE": "OPENING_RANGE_BREAKOUT",
+        "OPENING_RANGE_BREAKOUT": "OPENING_RANGE_BREAKOUT",
+        "BOLLINGER": "BOLLINGER_LOWER_BAND_REVERSAL",
+        "BOLLINGER_REVERSAL": "BOLLINGER_LOWER_BAND_REVERSAL",
+        "BOLLINGER_LOWER_BAND_REVERSAL": "BOLLINGER_LOWER_BAND_REVERSAL",
+        "WEDGE": "DESCENDING_WEDGE_BREAKOUT",
+        "WEDGE_BREAKOUT": "DESCENDING_WEDGE_BREAKOUT",
+        "DESCENDING_WEDGE": "DESCENDING_WEDGE_BREAKOUT",
+        "DESCENDING_WEDGE_BREAKOUT": "DESCENDING_WEDGE_BREAKOUT",
+        "MOMENTUM_RUNNER": "EARLY_MOMENTUM_RUNNER",
+        "EARLY_MOMENTUM": "EARLY_MOMENTUM_RUNNER",
+        "EARLY_MOMENTUM_RUNNER": "EARLY_MOMENTUM_RUNNER",
+        "MOMENTUM_24H": "24H_MOMENTUM_VOLUME",
+        "24H_MOMENTUM": "24H_MOMENTUM_VOLUME",
+        "24H_MOMENTUM_VOLUME": "24H_MOMENTUM_VOLUME",
+        "MOMENTUM_VOLUME": "24H_MOMENTUM_VOLUME",
+    }
+    return aliases.get(name, name or "UNKNOWN")
+
+
+def enabled_entry_strategy_names() -> list[str]:
+    return sorted(normalize_entry_strategy_name(item) for item in ENABLED_ENTRY_STRATEGIES)
 
 
 def _compute_pre_breakout_features(product_data: dict, market_state: dict) -> dict:
@@ -1645,6 +1684,28 @@ def select_entry_signal(product_data: dict) -> dict:
             "requires_mtf": False,
         },
     ]
+    enabled = set(enabled_entry_strategy_names())
+    if enabled:
+        candidates = [
+            candidate for candidate in candidates
+            if normalize_entry_strategy_name(candidate["strategy"]) in enabled
+            or normalize_entry_strategy_name(candidate["type"]) in enabled
+        ]
+        if not candidates:
+            return {
+                "type": "none",
+                "strategy": "NO_ENABLED_ENTRY_STRATEGY",
+                "score": 0.0,
+                "raw_score": 0.0,
+                "threshold": 100.0,
+                "features": {},
+                "requires_mtf": False,
+                "eligible": False,
+                "consensus_count": 0,
+                "consensus_bonus": 0.0,
+                "confidence_level": "NONE",
+                "confirming_strategies": [],
+            }
     candidates.sort(key=lambda item: item["score"], reverse=True)
 
     # --- consensus layer ---
@@ -2901,6 +2962,7 @@ def _position_held_minutes(pos: dict) -> int:
 
 def _entry_review_snapshot(pos: dict) -> dict:
     """Captures entry context so closed-trade review can explain why a trade failed."""
+    features = pos.get("entry_strategy_features", {}) or {}
     return {
         "entry_strategy": pos.get("entry_strategy", "unknown"),
         "entry_strategy_score": float(pos.get("entry_strategy_score", pos.get("signal_score", 0.0)) or 0.0),
@@ -2913,6 +2975,10 @@ def _entry_review_snapshot(pos: dict) -> dict:
         "entry_support_level": float(pos.get("entry_support_level", 0.0) or 0.0),
         "entry_support_floor": float(pos.get("entry_support_floor", 0.0) or 0.0),
         "entry_stop_distance_pct": float(pos.get("entry_stop_distance_pct", 0.0) or 0.0),
+        "entry_successful_retest": bool(features.get("successful_retest", False)),
+        "entry_accepted_above_level": bool(features.get("accepted_above_level", False)),
+        "entry_in_buy_zone": bool(features.get("entry_in_buy_zone", False)),
+        "entry_retest_age_candles": features.get("retest_age_candles"),
         "entry_pre_breakout_score": float(pos.get("pre_breakout_score", 0.0) or 0.0),
         "entry_orb_score": float(pos.get("orb_score", 0.0) or 0.0),
         "entry_bollinger_score": float(pos.get("bollinger_score", 0.0) or 0.0),
@@ -3508,6 +3574,252 @@ def build_portfolio_summary(active_positions: dict, history: list, live_prices: 
     return "\n".join(lines)
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _trade_event_key(trade: dict) -> str:
+    entry = trade.get("entry") or {}
+    exit_ = trade.get("exit") or {}
+    perf = trade.get("performance") or {}
+    return "|".join([
+        str(trade.get("product_id") or ""),
+        str(entry.get("timestamp") or ""),
+        str(exit_.get("timestamp") or ""),
+        str(exit_.get("reason") or ""),
+        str(perf.get("status") or ""),
+        f"{_safe_float(perf.get('pnl_usd')):.8f}",
+    ])
+
+
+def _strategy_from_trade(trade: dict) -> str:
+    review = trade.get("entry_review") or {}
+    strategy = normalize_entry_strategy_name(
+        review.get("entry_strategy")
+        or trade.get("entry_strategy")
+        or ""
+    )
+    if strategy not in {"", "UNKNOWN", "LEGACY/UNKNOWN"}:
+        return strategy
+
+    score_fields = [
+        ("CANDLE_BREAKOUT", "entry_pre_breakout_score"),
+        ("OPENING_RANGE_BREAKOUT", "entry_orb_score"),
+        ("BOLLINGER_LOWER_BAND_REVERSAL", "entry_bollinger_score"),
+        ("DESCENDING_WEDGE_BREAKOUT", "entry_wedge_score"),
+        ("EARLY_MOMENTUM_RUNNER", "entry_momentum_runner_score"),
+    ]
+    best_strategy = "UNKNOWN"
+    best_score = 0.0
+    for name, field in score_fields:
+        score = _safe_float(review.get(field))
+        if score > best_score:
+            best_strategy = name
+            best_score = score
+    return best_strategy if best_score > 0 else "UNKNOWN"
+
+
+def _trade_hold_minutes(trade: dict) -> int:
+    entry_ts = (trade.get("entry") or {}).get("timestamp") or ""
+    exit_ts = (trade.get("exit") or {}).get("timestamp") or ""
+    if not entry_ts or not exit_ts:
+        return 0
+    try:
+        entry_dt = datetime.fromisoformat(str(entry_ts).replace("Z", "+00:00"))
+        exit_dt = datetime.fromisoformat(str(exit_ts).replace("Z", "+00:00"))
+        return max(0, int((exit_dt - entry_dt).total_seconds() / 60))
+    except Exception:
+        return 0
+
+
+def _new_pattern_bucket(strategy: str) -> dict:
+    return {
+        "strategy": strategy,
+        "events": 0,
+        "closedTrades": 0,
+        "partialTakes": 0,
+        "wins": 0,
+        "losses": 0,
+        "realizedPnlUsd": 0.0,
+        "grossProfitUsd": 0.0,
+        "grossLossUsd": 0.0,
+        "pnlPctSum": 0.0,
+        "pnlPctCount": 0,
+        "scoreSum": 0.0,
+        "scoreCount": 0,
+        "holdMinutesSum": 0,
+        "holdMinutesCount": 0,
+        "supportRecorded": 0,
+        "retestRecorded": 0,
+        "buyZoneRecorded": 0,
+        "exitReasons": {},
+    }
+
+
+def _finalize_pattern_bucket(bucket: dict) -> dict:
+    closed = bucket["closedTrades"]
+    events = bucket["events"]
+    gross_loss_abs = abs(bucket["grossLossUsd"])
+    profit_factor = None if gross_loss_abs == 0 else bucket["grossProfitUsd"] / gross_loss_abs
+    return {
+        "strategy": bucket["strategy"],
+        "events": events,
+        "closedTrades": closed,
+        "partialTakes": bucket["partialTakes"],
+        "wins": bucket["wins"],
+        "losses": bucket["losses"],
+        "winRatePct": round((bucket["wins"] / closed * 100), 2) if closed else 0.0,
+        "realizedPnlUsd": round(bucket["realizedPnlUsd"], 2),
+        "grossProfitUsd": round(bucket["grossProfitUsd"], 2),
+        "grossLossUsd": round(bucket["grossLossUsd"], 2),
+        "profitFactor": round(profit_factor, 2) if profit_factor is not None else None,
+        "avgPnlPct": round(bucket["pnlPctSum"] / bucket["pnlPctCount"], 2) if bucket["pnlPctCount"] else 0.0,
+        "avgScore": round(bucket["scoreSum"] / bucket["scoreCount"], 1) if bucket["scoreCount"] else 0.0,
+        "avgHoldMinutes": round(bucket["holdMinutesSum"] / bucket["holdMinutesCount"], 1) if bucket["holdMinutesCount"] else 0.0,
+        "supportRecorded": bucket["supportRecorded"],
+        "supportCoveragePct": round((bucket["supportRecorded"] / events * 100), 2) if events else 0.0,
+        "retestRecorded": bucket["retestRecorded"],
+        "retestCoveragePct": round((bucket["retestRecorded"] / events * 100), 2) if events else 0.0,
+        "buyZoneRecorded": bucket["buyZoneRecorded"],
+        "buyZoneCoveragePct": round((bucket["buyZoneRecorded"] / events * 100), 2) if events else 0.0,
+        "exitReasons": dict(sorted(
+            bucket["exitReasons"].items(),
+            key=lambda item: (-item[1], item[0]),
+        )),
+    }
+
+
+def _pattern_review_recommendation(rows: list[dict]) -> str:
+    closed_rows = [row for row in rows if row["closedTrades"] > 0]
+    if not closed_rows:
+        return "No closed trades with strategy metadata yet. Keep the fresh paper run collecting data before disabling patterns."
+
+    enough_sample = [row for row in closed_rows if row["closedTrades"] >= 5]
+    if not enough_sample:
+        best = max(closed_rows, key=lambda row: (row["realizedPnlUsd"], row["winRatePct"]))
+        return (
+            f"Sample is still thin. Early leader is {best['strategy']} "
+            f"({best['closedTrades']} closed, {best['winRatePct']:.0f}% win rate, "
+            f"${best['realizedPnlUsd']:+.2f}), but wait for at least 5-10 closed trades "
+            "per active strategy before making it the only pattern."
+        )
+
+    profitable = [
+        row for row in enough_sample
+        if row["realizedPnlUsd"] > 0 and row["winRatePct"] >= 50.0
+    ]
+    if profitable:
+        best = max(profitable, key=lambda row: (row["realizedPnlUsd"], row["profitFactor"] or 0.0))
+        return (
+            f"Best supported candidate is {best['strategy']} "
+            f"({best['closedTrades']} closed, {best['winRatePct']:.0f}% win rate, "
+            f"${best['realizedPnlUsd']:+.2f}). Consider a focused paper run with "
+            f"ENABLED_ENTRY_STRATEGIES={best['strategy']}."
+        )
+
+    return (
+        "No strategy has enough profitable evidence yet. Keep the retest/support gate active, "
+        "avoid widening the strategy set, and collect a larger clean sample before increasing risk."
+    )
+
+
+def summarize_trade_patterns(history: list) -> dict:
+    """Groups realized trade performance by entry strategy and structure quality."""
+    unique_events: list[dict] = []
+    seen: set[str] = set()
+    for trade in history:
+        if not isinstance(trade, dict):
+            continue
+        status = (trade.get("performance") or {}).get("status")
+        if status not in {"PARTIAL", "CLOSED"}:
+            continue
+        key = _trade_event_key(trade)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_events.append(trade)
+
+    buckets: dict[str, dict] = {}
+    total_pnl = 0.0
+    wins = 0
+    losses = 0
+    closed_count = 0
+    partial_count = 0
+    exit_reasons: dict[str, int] = {}
+
+    for trade in unique_events:
+        strategy = _strategy_from_trade(trade)
+        bucket = buckets.setdefault(strategy, _new_pattern_bucket(strategy))
+        review = trade.get("entry_review") or {}
+        perf = trade.get("performance") or {}
+        exit_ = trade.get("exit") or {}
+        status = perf.get("status")
+        pnl = _safe_float(perf.get("pnl_usd"))
+        pnl_pct = _safe_float(perf.get("pnl_percentage"))
+        score = _safe_float(review.get("entry_strategy_score"))
+        hold_minutes = _trade_hold_minutes(trade)
+        exit_reason = str(exit_.get("reason") or "UNKNOWN")
+
+        bucket["events"] += 1
+        bucket["realizedPnlUsd"] += pnl
+        bucket["pnlPctSum"] += pnl_pct
+        bucket["pnlPctCount"] += 1
+        if score > 0:
+            bucket["scoreSum"] += score
+            bucket["scoreCount"] += 1
+        if hold_minutes > 0:
+            bucket["holdMinutesSum"] += hold_minutes
+            bucket["holdMinutesCount"] += 1
+        if _safe_float(review.get("entry_support_level")) > 0:
+            bucket["supportRecorded"] += 1
+        if bool(review.get("entry_successful_retest")):
+            bucket["retestRecorded"] += 1
+        if bool(review.get("entry_in_buy_zone")) or (
+            _safe_float(review.get("entry_buy_zone_low")) > 0
+            and _safe_float(review.get("entry_buy_zone_high")) > 0
+        ):
+            bucket["buyZoneRecorded"] += 1
+        bucket["exitReasons"][exit_reason] = bucket["exitReasons"].get(exit_reason, 0) + 1
+        exit_reasons[exit_reason] = exit_reasons.get(exit_reason, 0) + 1
+
+        total_pnl += pnl
+        if status == "PARTIAL":
+            bucket["partialTakes"] += 1
+            partial_count += 1
+        elif status == "CLOSED":
+            bucket["closedTrades"] += 1
+            closed_count += 1
+            if pnl > 0:
+                bucket["wins"] += 1
+                bucket["grossProfitUsd"] += pnl
+                wins += 1
+            else:
+                bucket["losses"] += 1
+                bucket["grossLossUsd"] += pnl
+                losses += 1
+
+    rows = [_finalize_pattern_bucket(bucket) for bucket in buckets.values()]
+    rows.sort(key=lambda row: (row["realizedPnlUsd"], row["closedTrades"]), reverse=True)
+
+    return {
+        "enabledEntryStrategies": enabled_entry_strategy_names() or ["ALL"],
+        "realizedEvents": len(unique_events),
+        "closedTrades": closed_count,
+        "partialTakes": partial_count,
+        "wins": wins,
+        "losses": losses,
+        "winRatePct": round((wins / closed_count * 100), 2) if closed_count else 0.0,
+        "realizedPnlUsd": round(total_pnl, 2),
+        "strategyCount": len(rows),
+        "strategyStats": rows,
+        "exitReasons": dict(sorted(exit_reasons.items(), key=lambda item: (-item[1], item[0]))),
+        "recommendation": _pattern_review_recommendation(rows),
+    }
+
+
 def build_trade_review_report(active_positions: dict, history: list) -> str:
     """Builds a compact diagnostic report focused on entry quality and stop behavior."""
     lines = [
@@ -3536,6 +3848,17 @@ def build_trade_review_report(active_positions: dict, history: list) -> str:
         ])
     else:
         lines.append("Closed trades: none recorded yet in trading_history.json")
+
+    pattern_stats = summarize_trade_patterns(history)
+    if pattern_stats.get("strategyStats"):
+        lines.append("By strategy:")
+        for row in pattern_stats["strategyStats"][:8]:
+            lines.append(
+                f"- {row['strategy']}: {row['closedTrades']} closed, "
+                f"{row['winRatePct']:.0f}% wins, ${row['realizedPnlUsd']:+.2f}, "
+                f"avg {row['avgPnlPct']:+.2f}%, support {row['supportCoveragePct']:.0f}%"
+            )
+        lines.append("Pattern recommendation: " + str(pattern_stats.get("recommendation", "")))
 
     if active_positions:
         lines.append(f"Open positions: {len(active_positions)}")
