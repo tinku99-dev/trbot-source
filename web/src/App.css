@@ -369,6 +369,83 @@ input:focus {
   font-size: 13px;
 }
 
+.research-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 18px;
+}
+
+.research-card,
+.indicator-guide article {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.research-card h3 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-family: var(--heading);
+  font-size: 25px;
+}
+
+.research-card p,
+.lotto-panel p,
+.indicator-guide p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.research-card strong,
+.indicator-guide strong {
+  display: block;
+  margin-top: 12px;
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.research-card ul,
+.lotto-panel ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.indicator-guide {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 18px;
+}
+
+.indicator-guide span,
+.indicator-guide small,
+.muted-text {
+  color: var(--muted);
+}
+
+.indicator-guide span {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.lotto-panel {
+  padding: 18px;
+}
+
+.option-idea {
+  display: inline-block;
+  max-width: 260px;
+  white-space: normal;
+  color: var(--ink);
+  font-weight: 800;
+}
+
 .inline-notice {
   display: flex;
   align-items: center;
@@ -595,6 +672,8 @@ small {
   .grid-two,
   .cards-three,
   .indicator-grid,
+  .research-grid,
+  .indicator-guide,
   .report-metrics {
     grid-template-columns: 1fr;
   }

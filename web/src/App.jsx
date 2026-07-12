@@ -15,6 +15,81 @@ const tabs = [
   { id: 'scalp', label: 'Crypto Scalp' },
 ]
 
+const strategyPlaybook = [
+  {
+    title: 'Breakout Retest',
+    bestFor: 'Trend continuation after a clean range break',
+    confirms: ['Close above resistance', 'Retest holds support', 'Volume expands', 'OBV accumulation'],
+    avoid: ['Buying the first wick', 'Retest closes below support', 'Breakout without volume'],
+  },
+  {
+    title: 'Opening Range Breakout',
+    bestFor: 'Early session momentum in liquid names',
+    confirms: ['Range high breaks', 'Price stays above VWAP', 'ADX confirms trend', 'BTC or market regime agrees'],
+    avoid: ['Chop inside the range', 'Weak relative strength', 'Immediate reversal back into range'],
+  },
+  {
+    title: 'Bollinger Reversal',
+    bestFor: 'Snapback from exhaustion lows',
+    confirms: ['Lower-band pierce', 'RSI or MFI recovering', 'Close back inside bands', 'Support nearby'],
+    avoid: ['Falling knife with no reclaim', 'Heavy distribution volume', 'Below major moving averages'],
+  },
+  {
+    title: 'Momentum Runner',
+    bestFor: 'High-liquidity coins or stocks already moving with participation',
+    confirms: ['24h or daily move is strong', 'Recent dollar volume is high', 'Higher lows continue', 'Trailing stop has room'],
+    avoid: ['Thin volume spikes', 'Overextended candle far above support', 'Late entry after parabolic move'],
+  },
+]
+
+const indicatorGuide = [
+  {
+    name: 'ADX',
+    use: 'Trend strength filter',
+    good: 'Above 20-25 supports trend trades; rising ADX helps confirm breakouts.',
+    caution: 'Lagging indicator, so it should confirm rather than trigger alone.',
+  },
+  {
+    name: 'RSI / Stochastic',
+    use: 'Momentum and exhaustion',
+    good: 'RSI rising from the 40-60 zone can support continuation; oversold reclaim can support reversals.',
+    caution: 'Overbought can stay overbought in strong trends.',
+  },
+  {
+    name: 'OBV / Volume',
+    use: 'Accumulation and participation',
+    good: 'OBV pressure and up-volume ratio help separate real demand from thin candles.',
+    caution: 'Volume spikes near highs can also mean distribution.',
+  },
+  {
+    name: 'VWAP / 200 SMA',
+    use: 'Fair value and regime',
+    good: 'Price above VWAP or 200 SMA favors long setups and helps avoid weak names.',
+    caution: 'A single reclaim is less useful without volume and structure.',
+  },
+  {
+    name: 'ATR',
+    use: 'Volatility-based stops',
+    good: 'Stops and missed-breakout cancels should expand for volatile symbols.',
+    caution: 'Too much ATR room can make risk too large for small accounts.',
+  },
+  {
+    name: 'MFI / CCI',
+    use: 'Volume-weighted momentum',
+    good: 'Useful for spotting stronger reversals when price and money flow recover together.',
+    caution: 'Works best with support/resistance, not as a standalone signal.',
+  },
+]
+
+const lottoOptionsRules = [
+  'Use only small premium that can go to zero.',
+  'Prefer liquid contracts with tight bid/ask, open interest, and visible volume.',
+  'Look for 5-20 DTE when trading a near-term catalyst; use more time for swing ideas.',
+  'Use calls only when trend, volume, and breakout/retest agree; use puts only for confirmed breakdowns.',
+  'Avoid contracts after IV has already exploded unless the move still has a clear catalyst.',
+  'Take partial profits quickly because theta decay is working against the buyer.',
+]
+
 const currency = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -489,16 +564,71 @@ function TickerAnalyzer({ apiKey, functionUrl, onOpenSettings }) {
 
 function ResearchSummary({ apiKey, functionUrl, onOpenSettings }) {
   return (
-    <RunReport
-      apiKey={apiKey}
-      functionUrl={functionUrl}
-      onOpenSettings={onOpenSettings}
-      endpoint="run"
-      title="Research Summary"
-      description="Runs the stock and crypto research pass and returns candidates, scores, buy ranges, stops, targets, and rejected names."
-      resultKey="candidates"
-      emptyTitle="No candidates returned"
-    />
+    <section className="tool-page">
+      <ResearchPlaybook />
+      <RunReport
+        apiKey={apiKey}
+        functionUrl={functionUrl}
+        onOpenSettings={onOpenSettings}
+        endpoint="run"
+        title="Research Summary"
+        description="Runs the stock and crypto research pass and returns candidates, scores, buy ranges, stops, targets, rejected names, and options research ideas when a licensed options chain is configured."
+        resultKey="candidates"
+        emptyTitle="No candidates returned"
+      />
+    </section>
+  )
+}
+
+function ResearchPlaybook() {
+  return (
+    <>
+      <Panel title="Strategy Research Playbook" meta="Patterns and failure checks">
+        <div className="research-grid">
+          {strategyPlaybook.map((item) => (
+            <article className="research-card" key={item.title}>
+              <h3>{item.title}</h3>
+              <p>{item.bestFor}</p>
+              <strong>Confirm with</strong>
+              <ul>
+                {item.confirms.map((point) => <li key={point}>{point}</li>)}
+              </ul>
+              <strong>Avoid when</strong>
+              <ul>
+                {item.avoid.map((point) => <li key={point}>{point}</li>)}
+              </ul>
+            </article>
+          ))}
+        </div>
+      </Panel>
+
+      <section className="grid-two">
+        <Panel title="Indicator Stack" meta="What each signal is doing">
+          <div className="indicator-guide">
+            {indicatorGuide.map((item) => (
+              <article key={item.name}>
+                <strong>{item.name}</strong>
+                <span>{item.use}</span>
+                <p>{item.good}</p>
+                <small>{item.caution}</small>
+              </article>
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title="Lotto Options Framework" meta="High risk research only">
+          <div className="lotto-panel">
+            <p>
+              Use options ideas as a shortlist for defined-risk research. These are not
+              guaranteed buys; the premium can go to zero, especially on short-dated contracts.
+            </p>
+            <ul>
+              {lottoOptionsRules.map((rule) => <li key={rule}>{rule}</li>)}
+            </ul>
+          </div>
+        </Panel>
+      </section>
+    </>
   )
 }
 
@@ -760,6 +890,7 @@ function SummaryTable({ rows, mode }) {
             {mode !== 'movers' && <th>Buy Range</th>}
             {mode !== 'movers' && <th>Stop</th>}
             {mode !== 'movers' && <th>Targets</th>}
+            {mode === 'candidates' && <th>Options Research</th>}
             {mode === 'rejected' && <th>Reason</th>}
             {mode !== 'rejected' && mode !== 'movers' && <th>Signals</th>}
           </tr>
@@ -775,6 +906,7 @@ function SummaryTable({ rows, mode }) {
               {mode !== 'movers' && <td>{formatPrice(row.buyRangeLow)} – {formatPrice(row.buyRangeHigh)}</td>}
               {mode !== 'movers' && <td>{formatPrice(row.stopLoss)}</td>}
               {mode !== 'movers' && <td>{formatPrice(row.target1)} / {formatPrice(row.target2)}</td>}
+              {mode === 'candidates' && <td>{row.option ? <span className="option-idea">{row.option}</span> : <span className="muted-text">No liquid contract</span>}</td>}
               {mode === 'rejected' && <td>{row.reason || 'Filtered'}</td>}
               {mode !== 'rejected' && mode !== 'movers' && <td>{[...(row.signals || []), ...(row.patterns || [])].slice(0, 3).join(', ') || 'Setup'}</td>}
             </tr>
