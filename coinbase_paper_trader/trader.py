@@ -23,6 +23,7 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 # Dynamic watchlist — fetched from Coinbase each cycle, sorted by 24h volume
 WATCHLIST_SIZE        = int(os.environ.get("WATCHLIST_SIZE", "50"))  # override via env
 QUOTE_CURRENCY        = "USD"   # only trade X-USD pairs
+WATCHLIST_STRONG_SETUP_OVERFLOW = os.environ.get("WATCHLIST_STRONG_SETUP_OVERFLOW", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # CAPITAL MANAGEMENT
@@ -101,6 +102,14 @@ RETEST_ACCEPT_BUFFER_PCT = float(os.environ.get("RETEST_ACCEPT_BUFFER_PCT", "0.1
 RETEST_STOP_BUFFER_PCT  = float(os.environ.get("RETEST_STOP_BUFFER_PCT", "0.35"))
 RETEST_SCORE_BONUS      = float(os.environ.get("RETEST_SCORE_BONUS", "8.0"))
 MAX_STRUCTURAL_STOP_PCT = float(os.environ.get("MAX_STRUCTURAL_STOP_PCT", "3.8"))
+LIMIT_ENTRY_ENABLED     = os.environ.get("LIMIT_ENTRY_ENABLED", "true").lower() == "true"
+LIMIT_ENTRY_EXPIRY_MINUTES = int(os.environ.get("LIMIT_ENTRY_EXPIRY_MINUTES", "180"))
+LIMIT_ENTRY_FILL_BUFFER_PCT = float(os.environ.get("LIMIT_ENTRY_FILL_BUFFER_PCT", "0.12"))
+LIMIT_ENTRY_PRICE_MODE  = os.environ.get("LIMIT_ENTRY_PRICE_MODE", "support").strip().lower()
+LIMIT_ENTRY_MIN_AGE_MINUTES = int(os.environ.get("LIMIT_ENTRY_MIN_AGE_MINUTES", "20"))
+LIMIT_ENTRY_MISS_BREAKOUT_PCT = float(os.environ.get("LIMIT_ENTRY_MISS_BREAKOUT_PCT", "1.2"))
+LIMIT_ENTRY_MISS_BREAKOUT_ATR_MULTIPLIER = float(os.environ.get("LIMIT_ENTRY_MISS_BREAKOUT_ATR_MULTIPLIER", "0.75"))
+LIMIT_ENTRY_MISS_BREAKOUT_MAX_PCT = float(os.environ.get("LIMIT_ENTRY_MISS_BREAKOUT_MAX_PCT", "4.0"))
 
 # Bollinger mean-reversion entries. The bot only opens long positions, so lower
 # band snapback setups are buyable; upper band extensions are recorded as a
@@ -145,6 +154,10 @@ MOMENTUM_RUNNER_MIN_1H_CHANGE = float(os.environ.get("MOMENTUM_RUNNER_MIN_1H_CHA
 MOMENTUM_RUNNER_MIN_RECENT_DOLLAR_VOLUME = float(os.environ.get("MOMENTUM_RUNNER_MIN_RECENT_DOLLAR_VOLUME", "25000"))
 MOMENTUM_RUNNER_MIN_24H_DOLLAR_VOLUME = float(os.environ.get("MOMENTUM_RUNNER_MIN_24H_DOLLAR_VOLUME", "2500000"))
 MOMENTUM_RUNNER_MAX_POSITION_PCT = float(os.environ.get("MOMENTUM_RUNNER_MAX_POSITION_PCT", "75"))
+WATCHLIST_MIN_DOLLAR_VOLUME = float(os.environ.get(
+    "WATCHLIST_MIN_DOLLAR_VOLUME",
+    str(MOMENTUM_RUNNER_MIN_24H_DOLLAR_VOLUME),
+))
 
 # OBV (On-Balance Volume) confirmation: price should be breaking out with net
 # accumulation, not just a thin candle. `obv_pressure_pct` normalizes OBV change
@@ -306,6 +319,7 @@ SHADOW_ALERT_MAX_PER_CYCLE = int(os.environ.get("SHADOW_ALERT_MAX_PER_CYCLE", "5
 DATA_DIR = os.environ.get("DATA_DIR", "").strip()
 
 PORTFOLIO_FILE = "active_paper_positions.json"
+PENDING_ENTRY_FILE = "pending_entry_orders.json"
 HISTORY_FILE   = "trading_history.json"
 MARKET_STATE_FILE = "market_state_cache.json"
 DAILY_PNL_FILE = "daily_pnl_ledger.json"
@@ -332,6 +346,7 @@ _STATE_BACKUP_MIN_INTERVAL_SECONDS = int(os.environ.get("STATE_BACKUP_MIN_INTERV
 _BLOB_REST_TIMEOUT_SECONDS = int(os.environ.get("BLOB_REST_TIMEOUT_SECONDS", "15"))
 _STATE_BACKUP_FILES = {
     PORTFOLIO_FILE,
+    PENDING_ENTRY_FILE,
     HISTORY_FILE,
     DAILY_PNL_FILE,
     SUMMARY_STATE_FILE,
@@ -2127,7 +2142,8 @@ def get_market_snapshot(client) -> tuple[list[dict], dict]:
     Returns (products, prices). When `client` is None (no API keys), uses
     Coinbase's public market-data endpoints so paper trading still works.
 
-      products : list of enriched dicts sorted by 24h volume (top WATCHLIST_SIZE)
+      products : list of enriched dicts sorted by liquidity + movement quality
+                 (top WATCHLIST_SIZE)
                  each dict: {product_id, price, volume_24h,
                               price_change_24h, volume_change_24h, score,
                               pre_breakout_score, pre_breakout_features,
@@ -2156,26 +2172,30 @@ def get_market_snapshot(client) -> tuple[list[dict], dict]:
                 continue
             if price <= 0 or volume_24h <= 0:
                 continue
+            prices[prod["product_id"]] = price
+            dollar_volume_24h = price * volume_24h
+            if dollar_volume_24h < WATCHLIST_MIN_DOLLAR_VOLUME:
+                continue
             score = compute_signal_score(price_chg, volume_chg)
             products.append({
                 "product_id":       prod["product_id"],
                 "price":            price,
                 "volume_24h":       volume_24h,
+                "dollar_volume_24h": round(dollar_volume_24h, 2),
                 "price_change_24h": price_chg,
                 "volume_change_24h":volume_chg,
                 "score":            score,
             })
-            prices[prod["product_id"]] = price
 
-        # Rank by traded USD value, not raw token units. Raw volume lets cheap,
-        # high-supply tokens crowd out higher-priced movers like ZEC/WLD.
-        products.sort(key=lambda x: x["price"] * x["volume_24h"], reverse=True)
+        # Rank by quality, not raw token units. This keeps the universe focused
+        # on liquid coins that are actually moving.
+        products.sort(key=_watchlist_quality_score, reverse=True)
         products = products[:WATCHLIST_SIZE]
 
         # Log top 5 with their scores
-        top5 = sorted(products, key=lambda x: x["score"], reverse=True)[:5]
+        top5 = sorted(products, key=_watchlist_quality_score, reverse=True)[:5]
         print(f"[Snapshot] Top scorers: " +
-              ", ".join(f"{p['product_id']} {p['score']:.0f}pts" for p in top5))
+              ", ".join(f"{p['product_id']} q{_watchlist_quality_score(p):.0f}/{p['score']:.0f}pts" for p in top5))
     except Exception as exc:
         print(f"[Snapshot] Error: {exc}")
 
@@ -2201,6 +2221,7 @@ def get_market_snapshot_public() -> tuple[list[dict], dict]:
         price = float(last[4] or 0)  # close of most recent candle
         if price <= 0:
             continue
+        prices[pid] = price
 
         day_slice = candles[-per_day:]
         volume_24h = sum(float(c[5] or 0) for c in day_slice)
@@ -2213,11 +2234,14 @@ def get_market_snapshot_public() -> tuple[list[dict], dict]:
         obv = calculate_obv_metrics(candles)
         price_chg_15m = candle_change_pct(candles, 3)
         price_chg_1h = candle_change_pct(candles, 12)
+        dollar_volume_24h = price * volume_24h
+        if dollar_volume_24h < WATCHLIST_MIN_DOLLAR_VOLUME:
+            continue
         product = {
             "product_id":            pid,
             "price":                 price,
             "volume_24h":            volume_24h,
-            "dollar_volume_24h":     round(price * volume_24h, 2),
+            "dollar_volume_24h":     round(dollar_volume_24h, 2),
             "price_change_24h":      round(price_chg, 3),
             "price_change_15m":      round(price_chg_15m, 3),
             "price_change_1h":       round(price_chg_1h, 3),
@@ -2236,29 +2260,31 @@ def get_market_snapshot_public() -> tuple[list[dict], dict]:
         product["momentum_runner_score"] = momentum["momentum_runner_score"]
         product["momentum_runner_features"] = momentum["features"]
         products.append(product)
-        prices[pid] = price
         time.sleep(0.05)  # stay under the public rate limit
 
-    # Rank the watchlist by USD volume (price x token volume), not raw token
-    # units — otherwise cheap, high-supply coins crowd out real movers.
-    products.sort(key=lambda x: x["price"] * x["volume_24h"], reverse=True)
+    # Rank the watchlist by quality, not raw token units. Liquidity matters, but
+    # the final top 50 should also include names with real recent movement and
+    # strategy strength.
+    products.sort(key=_watchlist_quality_score, reverse=True)
     watchlist = products[:WATCHLIST_SIZE]
 
-    # Never drop a strong strategy setup just because it ranks low on volume:
-    # always include any coin already at/above the buy threshold.
+    # Optional overflow for research mode. Production defaults to a hard top-50
+    # so we do not keep expanding into weaker names.
     in_list = {p["product_id"] for p in watchlist}
-    for p in products:
-        signal = select_entry_signal(p)
-        if p["product_id"] not in in_list and signal["eligible"]:
-            watchlist.append(p)
-            in_list.add(p["product_id"])
+    if WATCHLIST_STRONG_SETUP_OVERFLOW:
+        for p in products:
+            signal = select_entry_signal(p)
+            if p["product_id"] not in in_list and signal["eligible"]:
+                watchlist.append(p)
+                in_list.add(p["product_id"])
     products = watchlist
 
-    top5 = sorted(products, key=lambda x: select_entry_signal(x)["score"], reverse=True)[:5]
+    top5 = sorted(products, key=_watchlist_quality_score, reverse=True)[:5]
     print("[Snapshot] Top strategy scorers: " +
           ", ".join(
               f"{p['product_id']} {(s := select_entry_signal(p))['strategy']} "
-              f"{s['score']:.0f}pts (raw {s['raw_score']:.0f} +{s['consensus_bonus']:.0f} {s['confidence_level']} {s['consensus_count']}x)"
+              f"q{_watchlist_quality_score(p):.0f}/{s['score']:.0f}pts "
+              f"(raw {s['raw_score']:.0f} +{s['consensus_bonus']:.0f} {s['confidence_level']} {s['consensus_count']}x)"
               for p in top5
           ))
     return products, prices
@@ -2356,12 +2382,21 @@ def _capital_deployed(active_positions: dict) -> float:
                for p in active_positions.values())
 
 
-def _budget_is_full(active_positions: dict, next_size: float | None = None) -> bool:
+def _pending_capital_reserved(pending_entries: dict) -> float:
+    """Returns total USD reserved by pending limit-style entries."""
+    return sum(float(p.get("allocated_usd") or CAPITAL_PER_TRADE_USD)
+               for p in pending_entries.values())
+
+
+def _budget_is_full(active_positions: dict, pending_entries: dict | None = None,
+                    next_size: float | None = None) -> bool:
     """Returns True when opening another position would exceed limits."""
-    if len(active_positions) >= MAX_OPEN_POSITIONS:
+    pending_entries = pending_entries or {}
+    if (len(active_positions) + len(pending_entries)) >= MAX_OPEN_POSITIONS:
         return True
     size = next_size if next_size is not None else CAPITAL_PER_TRADE_USD
-    return (_capital_deployed(active_positions) + size) > TOTAL_CAPITAL_USD
+    reserved = _capital_deployed(active_positions) + _pending_capital_reserved(pending_entries)
+    return (reserved + size) > TOTAL_CAPITAL_USD
 
 
 def _shadow_alert_key(product_id: str, strategy: str) -> str:
@@ -2386,6 +2421,46 @@ def should_include_shadow_alert(product_id: str, strategy: str) -> bool:
     state = {k: v for k, v in state.items() if int(v or 0) >= cutoff}
     save_json_file(SHADOW_ALERTS_FILE, state)
     return True
+
+
+def _watchlist_quality_score(product_data: dict) -> float:
+    """
+    Ranks the trade universe by liquidity plus movement quality, not just raw
+    volume. This keeps the bot focused on the strongest ~50 names instead of
+    spending entries on thin or inactive coins.
+    """
+    price = float(product_data.get("price", 0.0) or 0.0)
+    volume_24h = float(product_data.get("volume_24h", 0.0) or 0.0)
+    dollar_volume = float(product_data.get("dollar_volume_24h", 0.0) or 0.0)
+    if dollar_volume <= 0 and price > 0 and volume_24h > 0:
+        dollar_volume = price * volume_24h
+
+    # Log-like buckets without importing math: each USD threshold adds weight,
+    # so BTC/ETH/SOL stay high, but real mid-cap movers can still compete.
+    liquidity_score = 0.0
+    for threshold, points in (
+        (2_500_000, 10),
+        (5_000_000, 10),
+        (10_000_000, 10),
+        (25_000_000, 10),
+        (50_000_000, 10),
+        (100_000_000, 10),
+    ):
+        if dollar_volume >= threshold:
+            liquidity_score += points
+
+    move_24h = abs(float(product_data.get("price_change_24h", 0.0) or 0.0))
+    move_1h = abs(float(product_data.get("price_change_1h", 0.0) or 0.0))
+    move_15m = abs(float(product_data.get("price_change_15m", 0.0) or 0.0))
+    movement_score = min(25.0, move_24h * 1.5) + min(12.0, move_1h * 4.0) + min(8.0, move_15m * 8.0)
+
+    try:
+        signal = select_entry_signal(product_data)
+        strategy_score = min(30.0, float(signal.get("score", 0.0) or 0.0) * 0.30)
+    except Exception:
+        strategy_score = min(15.0, float(product_data.get("score", 0.0) or 0.0) * 0.15)
+
+    return liquidity_score + movement_score + strategy_score
 
 
 def build_shadow_candidate(product_data: dict, signal: dict, liquidity: dict,
@@ -2413,6 +2488,129 @@ def build_shadow_candidate(product_data: dict, signal: dict, liquidity: dict,
         "hypothetical_qty": (CAPITAL_PER_TRADE_USD / price) if price else 0.0,
         "take_profit": price * (1 + TAKE_PROFIT_PERCENT / 100) if price else 0.0,
         "stop": price * (1 - TRAILING_PERCENT / 100) if price else 0.0,
+    }
+
+
+def _limit_entry_allowed_for_signal(signal: dict, structure: dict) -> bool:
+    strategy = str(signal.get("strategy", "") or "")
+    if not LIMIT_ENTRY_ENABLED:
+        return False
+    if strategy not in {"CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT"}:
+        return False
+    return bool(structure.get("ok"))
+
+
+def _limit_entry_price(signal: dict, structure: dict, market_price: float) -> float:
+    support_level = float(structure.get("support_level", 0.0) or 0.0)
+    buy_zone_low = float(structure.get("buy_zone_low", 0.0) or 0.0)
+    buy_zone_high = float(structure.get("buy_zone_high", 0.0) or 0.0)
+    if LIMIT_ENTRY_PRICE_MODE == "buy_zone_low" and buy_zone_low > 0:
+        return buy_zone_low
+    if LIMIT_ENTRY_PRICE_MODE == "buy_zone_mid" and buy_zone_low > 0 and buy_zone_high > 0:
+        return (buy_zone_low + buy_zone_high) / 2.0
+    if support_level > 0:
+        return support_level
+    if buy_zone_low > 0:
+        return buy_zone_low
+    return market_price
+
+
+def _open_position_from_entry(
+    active_positions: dict,
+    product_data: dict,
+    signal: dict,
+    structure: dict,
+    position_size: float,
+    fill_price: float,
+    mtf_scores: dict,
+    sizing_reasons: list[str],
+    entry_mode: str = "market",
+    limit_price: float = 0.0,
+) -> dict:
+    product_id = product_data["product_id"]
+    crypto_qty = position_size / fill_price if fill_price > 0 else 0.0
+    _sig_feats = signal.get("features", {}) or {}
+    _fvg_candle_open = float(_sig_feats.get("trigger_candle_open", 0.0) or 0.0)
+    if structure.get("ok") and float(structure.get("stop_loss", 0.0) or 0.0) > 0:
+        initial_stop = float(structure["stop_loss"])
+        stop_method = (
+            f"support retest ${float(structure.get('support_level', 0.0) or 0.0):,.6g} "
+            f"/ floor ${float(structure.get('support_floor', 0.0) or 0.0):,.6g}"
+        )
+    elif _fvg_candle_open > 0 and _fvg_candle_open < fill_price:
+        fvg_stop = _fvg_candle_open * (1 - 0.003)
+        flat_stop = fill_price * (1 - TRAILING_PERCENT / 100)
+        initial_stop = max(fvg_stop, flat_stop)
+        stop_method = f"FVG (candle open ${_fvg_candle_open:,.6g})"
+    else:
+        initial_stop = fill_price * (1 - TRAILING_PERCENT / 100)
+        stop_method = f"flat {TRAILING_PERCENT:.1f}%"
+    main_tp_pct, main_tp_reason = _take_profit_percent_for_signal(signal)
+    take_profit_target = fill_price * (1 + main_tp_pct / 100)
+    size_pct = round(position_size / CAPITAL_PER_TRADE_USD * 100) if CAPITAL_PER_TRADE_USD else 0
+
+    active_positions[product_id] = {
+        "product_id":             product_id,
+        "mode":                   "live" if LIVE_ORDERS_ACTIVE else "paper",
+        "entry_mode":             entry_mode,
+        "entry_limit_price":      float(limit_price or 0.0),
+        "entry_timestamp":        _utcnow_iso(),
+        "entry_price":            fill_price,
+        "allocated_usd":          position_size,
+        "original_allocated_usd": position_size,
+        "simulated_qty":          crypto_qty,
+        "original_simulated_qty": crypto_qty,
+        "position_size_pct":      size_pct,
+        "highest_tracked_price":  fill_price,
+        "current_trailing_stop":  initial_stop,
+        "take_profit_boundary":   take_profit_target,
+        "main_take_profit_percent": main_tp_pct,
+        "main_take_profit_reason": main_tp_reason,
+        "quick_take_profit_boundary": fill_price * (1 + QUICK_TAKE_PROFIT_PERCENT / 100),
+        "quick_take_profit_taken": False,
+        "partial_take_profit_taken": False,
+        "quick_take_profit_sell_percent": QUICK_TAKE_PROFIT_SELL_PERCENT,
+        "take_profit_sell_percent": TAKE_PROFIT_SELL_PERCENT,
+        "moon_bag_percent":       MOON_BAG_PERCENT,
+        "signal_score":           product_data.get("score", 0),
+        "pre_breakout_score":     product_data.get("pre_breakout_score", 0),
+        "pre_breakout_features":  product_data.get("pre_breakout_features", {}),
+        "entry_strategy":         signal["strategy"],
+        "entry_strategy_score":   signal["score"],
+        "entry_strategy_raw_score": signal.get("raw_score", signal["score"]),
+        "entry_strategy_features": signal["features"],
+        "entry_confidence_level": signal.get("confidence_level", "SINGLE"),
+        "entry_consensus_count":  signal.get("consensus_count", 1),
+        "entry_confirming_strategies": signal.get("confirming_strategies", [signal["strategy"]]),
+        "orb_score":              product_data.get("orb_score", 0),
+        "orb_features":           product_data.get("orb_features", {}),
+        "bollinger_score":        product_data.get("bollinger_score", 0),
+        "bollinger_features":     product_data.get("bollinger_features", {}),
+        "wedge_score":            product_data.get("wedge_score", 0),
+        "wedge_features":         product_data.get("wedge_features", {}),
+        "momentum_runner_score":  product_data.get("momentum_runner_score", 0),
+        "momentum_runner_features": product_data.get("momentum_runner_features", {}),
+        "mtf_scores":             mtf_scores,
+        "dollar_volume_24h":      float(product_data.get("dollar_volume_24h", 0.0) or 0.0),
+        "breakout_dollar_volume": float(product_data.get("recent_window_dollar_volume", 0.0) or 0.0),
+        "obv":                    product_data.get("obv", {}),
+        "initial_stop_method":    stop_method,
+        "fvg_candle_open":        _fvg_candle_open,
+        "entry_buy_zone_low":     float(structure.get("buy_zone_low", 0.0) or 0.0),
+        "entry_buy_zone_high":    float(structure.get("buy_zone_high", 0.0) or 0.0),
+        "entry_support_level":    float(structure.get("support_level", 0.0) or 0.0),
+        "entry_support_floor":    float(structure.get("support_floor", 0.0) or 0.0),
+        "entry_stop_distance_pct": float(structure.get("stop_distance_pct", 0.0) or 0.0),
+        "entry_sizing_notes":     list(sizing_reasons),
+    }
+    return {
+        "crypto_qty": crypto_qty,
+        "initial_stop": initial_stop,
+        "take_profit_target": take_profit_target,
+        "stop_method": stop_method,
+        "size_pct": size_pct,
+        "main_tp_pct": main_tp_pct,
+        "main_tp_reason": main_tp_reason,
     }
 
 
@@ -2606,7 +2804,176 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
     }
 
 
-def scan_and_execute_entries(client, active_positions: dict, products: list[dict], market_state: dict, daily_ledger: dict):
+def manage_pending_entries(client, active_positions: dict, pending_entries: dict,
+                           products_by_id: dict[str, dict], live_prices: dict) -> tuple[dict, bool]:
+    """Fills or cancels pending limit-style entries using later market runs."""
+    if not isinstance(pending_entries, dict):
+        pending_entries = {}
+    changed = False
+    now = datetime.now(timezone.utc)
+
+    for product_id, order in list(pending_entries.items()):
+        if product_id in active_positions:
+            del pending_entries[product_id]
+            changed = True
+            continue
+
+        expires_at = str(order.get("expires_at", "") or "")
+        try:
+            expiry_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00")) if expires_at else None
+        except Exception:
+            expiry_dt = None
+        created_at = str(order.get("created_at", "") or "")
+        try:
+            created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")) if created_at else None
+        except Exception:
+            created_dt = None
+        order_age_minutes = (
+            max(0.0, (now - created_dt).total_seconds() / 60.0)
+            if created_dt else 0.0
+        )
+        if expiry_dt and now >= expiry_dt:
+            print(f"  [LIMIT CANCEL] {product_id}: order expired before retest fill.")
+            del pending_entries[product_id]
+            changed = True
+            continue
+
+        current_price = float(live_prices.get(product_id, 0.0) or 0.0)
+        if current_price <= 0:
+            continue
+
+        limit_price = float(order.get("limit_price", 0.0) or 0.0)
+        invalidation_floor = float(order.get("invalidation_floor", 0.0) or 0.0)
+        signal_price = float(order.get("signal_price", 0.0) or 0.0)
+        buy_zone_high = float(order.get("buy_zone_high", 0.0) or 0.0)
+        latest_low = current_price
+        try:
+            candles = fetch_candles(product_id)
+            if candles:
+                latest_low = float(candles[-1][1] or current_price)
+        except Exception:
+            candles = []
+
+        if invalidation_floor > 0 and latest_low < invalidation_floor:
+            print(
+                f"  [LIMIT CANCEL] {product_id}: support failed "
+                f"(low ${latest_low:,.6g} < ${invalidation_floor:,.6g})."
+            )
+            del pending_entries[product_id]
+            changed = True
+            continue
+
+        reversal = detect_bearish_reversal(product_id, candles)
+        if reversal.get("bearish") and (
+            bool(reversal.get("severe"))
+            or int(reversal.get("confirmation_count", 0) or 0) >= max(2, BEARISH_REVERSAL_MIN_CONFIRMATIONS)
+        ):
+            print(
+                f"  [LIMIT CANCEL] {product_id}: bearish reversion invalidated retest "
+                f"({reversal.get('reason', 'confirmed reversal')})."
+            )
+            del pending_entries[product_id]
+            changed = True
+            continue
+
+        breakout_reference = max(limit_price, buy_zone_high, signal_price)
+        miss_breakout_floor_pct = max(0.1, LIMIT_ENTRY_MISS_BREAKOUT_PCT)
+        miss_breakout_cap_pct = max(miss_breakout_floor_pct, LIMIT_ENTRY_MISS_BREAKOUT_MAX_PCT)
+        atr_pct = 0.0
+        try:
+            atr_pct = calculate_atr_pct(product_id)
+        except Exception:
+            atr_pct = 0.0
+        atr_based_escape_pct = atr_pct * max(0.0, LIMIT_ENTRY_MISS_BREAKOUT_ATR_MULTIPLIER)
+        miss_breakout_pct = min(
+            miss_breakout_cap_pct,
+            max(miss_breakout_floor_pct, atr_based_escape_pct),
+        )
+        breakout_escape_price = breakout_reference * (1 + miss_breakout_pct / 100.0) if breakout_reference > 0 else 0.0
+        min_age_minutes = max(0, LIMIT_ENTRY_MIN_AGE_MINUTES)
+        if (
+            breakout_escape_price > 0
+            and order_age_minutes >= min_age_minutes
+            and current_price >= breakout_escape_price
+            and latest_low > max(limit_price, buy_zone_high, 0.0)
+        ):
+            print(
+                f"  [LIMIT CANCEL] {product_id}: breakout ran without retest "
+                f"(spot ${current_price:,.6g} >= ${breakout_escape_price:,.6g}, "
+                f"escape {miss_breakout_pct:.2f}%, ATR {atr_pct:.2f}%, age {order_age_minutes:.0f}m)."
+            )
+            del pending_entries[product_id]
+            changed = True
+            continue
+
+        fill_buffer = max(0.0, LIMIT_ENTRY_FILL_BUFFER_PCT)
+        touched_limit = latest_low <= limit_price if limit_price > 0 else False
+        current_in_fill_zone = current_price <= (limit_price * (1 + fill_buffer / 100.0)) if limit_price > 0 else False
+        if not touched_limit and not current_in_fill_zone:
+            continue
+
+        product_data = products_by_id.get(product_id)
+        if not isinstance(product_data, dict):
+            print(f"  [LIMIT HOLD] {product_id}: product snapshot missing, waiting for next run.")
+            continue
+
+        fill_price = current_price if current_price <= limit_price else limit_price
+        signal = order.get("signal", {}) or {}
+        structure = order.get("structure", {}) or {}
+        mtf_scores = order.get("mtf_scores", {}) or {}
+        sizing_reasons = list(order.get("sizing_reasons", []) or [])
+        position_size = float(order.get("allocated_usd", CAPITAL_PER_TRADE_USD) or CAPITAL_PER_TRADE_USD)
+
+        if LIVE_ORDERS_ACTIVE:
+            if LIVE_ALLOWED_PRODUCTS and product_id.upper() not in LIVE_ALLOWED_PRODUCTS:
+                print(f"  [LIVE LIMIT SKIP] {product_id}: not in LIVE_ALLOWED_PRODUCTS")
+                del pending_entries[product_id]
+                changed = True
+                continue
+            try:
+                order_resp = client.market_order_buy(
+                    client_order_id=f"trader-limit-fill-{product_id}-{int(now.timestamp())}",
+                    product_id=product_id,
+                    quote_size=str(round(position_size, 2)),
+                )
+                print(f"  [LIVE ORDER] {product_id} pending fill order_id={order_resp.get('order_id', 'unknown')}")
+            except Exception as exc:
+                print(f"  [LIVE ORDER ERROR] {product_id}: {exc}")
+                continue
+
+        entry_meta = _open_position_from_entry(
+            active_positions,
+            product_data,
+            signal,
+            structure,
+            position_size,
+            fill_price,
+            mtf_scores,
+            sizing_reasons,
+            entry_mode="limit_fill",
+            limit_price=limit_price,
+        )
+        del pending_entries[product_id]
+        changed = True
+
+        confidence_label = signal.get("confidence_level", "SINGLE")
+        msg = (
+            f"🟢 [{'LIVE BUY' if LIVE_ORDERS_ACTIVE else 'PAPER BUY'}] {product_id} — Pending Limit Filled\n"
+            f"💵 Fill: ${fill_price:,.6g}  |  Limit: ${limit_price:,.6g}\n"
+            f"📍 Support: ${float(structure.get('support_level', 0.0) or 0.0):,.6g}  |  "
+            f"Zone: ${float(structure.get('buy_zone_low', 0.0) or 0.0):,.6g}-${float(structure.get('buy_zone_high', 0.0) or 0.0):,.6g}\n"
+            f"🛡️ Stop: ${entry_meta['initial_stop']:,.6g} [{entry_meta['stop_method']}]\n"
+            f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%  |  Main TP: ${entry_meta['take_profit_target']:,.6g} (+{entry_meta['main_tp_pct']:.0f}% {entry_meta['main_tp_reason']})\n"
+            f"📊 Entry strategy: {signal.get('strategy', 'unknown')} (score {float(signal.get('score', 0.0) or 0.0):.0f}, {confidence_label})"
+        )
+        print(f"  {msg}")
+        send_discord_alert(msg)
+
+    return pending_entries, changed
+
+
+def scan_and_execute_entries(client, active_positions: dict, pending_entries: dict,
+                             products: list[dict], market_state: dict, daily_ledger: dict):
     """
     Scans enriched product list, scores each coin, and enters positions
     only when score >= MIN_SIGNAL_SCORE and budget allows.
@@ -2618,8 +2985,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
     # Primary: candle-based detector. Fallback: rolling-snapshot detector.
     candle_candidates = sorted(
         products,
-        key=lambda x: float(x.get("dollar_volume_24h", 0.0) or 0.0)
-        or (float(x.get("price", 0.0) or 0.0) * float(x.get("volume_24h", 0.0) or 0.0)),
+        key=_watchlist_quality_score,
         reverse=True,
     )[:CANDLE_SCAN_LIMIT]
     candle_ids = {p["product_id"] for p in candle_candidates}
@@ -2701,7 +3067,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
         product_id = prod["product_id"]
         price      = prod["price"]
 
-        if product_id in active_positions:
+        if product_id in active_positions or product_id in pending_entries:
             continue
 
         if price <= 0:
@@ -2758,12 +3124,11 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                 sizing_reasons.append(f"runner cap {MOMENTUM_RUNNER_MAX_POSITION_PCT:.0f}%")
             position_size, fragile_reasons = _risk_adjusted_position_size(prod, signal, position_size)
             sizing_reasons.extend(fragile_reasons)
-            size_pct           = round(position_size / CAPITAL_PER_TRADE_USD * 100)
 
-            if _budget_is_full(active_positions, next_size=position_size):
+            if _budget_is_full(active_positions, pending_entries, next_size=position_size):
                 budget_skip_reason = (
-                    f"budget is full ({len(active_positions)}/{MAX_OPEN_POSITIONS} positions, "
-                    f"${_capital_deployed(active_positions):,.0f}/${TOTAL_CAPITAL_USD:,.0f} deployed)"
+                    f"budget is full ({len(active_positions) + len(pending_entries)}/{MAX_OPEN_POSITIONS} slots, "
+                    f"${_capital_deployed(active_positions) + _pending_capital_reserved(pending_entries):,.0f}/${TOTAL_CAPITAL_USD:,.0f} reserved)"
                 )
                 if len(shadow_candidates) < SHADOW_ALERT_MAX_PER_CYCLE and should_include_shadow_alert(product_id, signal["strategy"]):
                     shadow_candidates.append(build_shadow_candidate(prod, signal, liquidity, obv, mtf_scores))
@@ -2771,26 +3136,59 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                     break
                 continue
 
-            crypto_qty         = position_size / price
-            _sig_feats = signal.get("features", {}) or {}
-            _fvg_candle_open = float(_sig_feats.get("trigger_candle_open", 0.0) or 0.0)
-            if structure.get("ok") and float(structure.get("stop_loss", 0.0) or 0.0) > 0:
-                initial_stop = float(structure["stop_loss"])
-                _stop_method = (
-                    f"support retest ${float(structure.get('support_level', 0.0) or 0.0):,.6g} "
-                    f"/ floor ${float(structure.get('support_floor', 0.0) or 0.0):,.6g}"
+            if (not LIVE_ORDERS_ACTIVE) and _limit_entry_allowed_for_signal(signal, structure):
+                limit_price = _limit_entry_price(signal, structure, price)
+                if limit_price <= 0:
+                    limit_price = price
+                expiry_dt = datetime.now(timezone.utc) + timedelta(minutes=max(5, LIMIT_ENTRY_EXPIRY_MINUTES))
+                pending_entries[product_id] = {
+                    "product_id": product_id,
+                    "created_at": _utcnow_iso(),
+                    "expires_at": expiry_dt.isoformat(),
+                    "mode": "paper",
+                    "entry_style": "limit_retest",
+                    "limit_price": float(limit_price),
+                    "signal_price": float(price),
+                    "allocated_usd": float(position_size),
+                    "signal": signal,
+                    "structure": structure,
+                    "mtf_scores": mtf_scores,
+                    "sizing_reasons": list(sizing_reasons),
+                    "support_level": float(structure.get("support_level", 0.0) or 0.0),
+                    "support_floor": float(structure.get("support_floor", 0.0) or 0.0),
+                    "invalidation_floor": float(structure.get("support_floor", 0.0) or 0.0),
+                    "buy_zone_low": float(structure.get("buy_zone_low", 0.0) or 0.0),
+                    "buy_zone_high": float(structure.get("buy_zone_high", 0.0) or 0.0),
+                    "product_snapshot": {
+                        "price": float(price),
+                        "score": float(prod.get("score", 0.0) or 0.0),
+                        "dollar_volume_24h": float(prod.get("dollar_volume_24h", 0.0) or 0.0),
+                    },
+                }
+
+                confirming_strategies = signal.get("confirming_strategies", [signal["strategy"]])
+                confidence_label = signal.get("confidence_level", "SINGLE")
+                raw_score = signal.get("raw_score", signal["score"])
+                bonus = signal.get("consensus_bonus", 0.0)
+                bonus_str = f" +{bonus:.0f} bonus" if bonus > 0 else ""
+                sizing_note = f"\n   Sizing: {'; '.join(sizing_reasons)}" if sizing_reasons else ""
+                confirming_str = " + ".join(s.replace("_", " ") for s in confirming_strategies)
+                msg = (
+                    f"🟦 [PAPER LIMIT] {product_id}\n"
+                    f"💵 Signal: ${price:,.6g}  |  Limit: ${limit_price:,.6g}  |  Size: ${position_size:,.0f}\n"
+                    f"📍 Support: ${float(structure.get('support_level', 0.0) or 0.0):,.6g}  |  "
+                    f"Zone: ${float(structure.get('buy_zone_low', 0.0) or 0.0):,.6g}-${float(structure.get('buy_zone_high', 0.0) or 0.0):,.6g}\n"
+                    f"⏳ Expires: {expiry_dt.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                    f"📊 Score: {signal['score']:.0f}/100 [{confidence_label}]  (raw {raw_score:.0f}{bonus_str})\n"
+                    f"   Strategy: {signal['strategy'].replace('_', ' ')}\n"
+                    f"   Confirmed by: {confirming_str}"
+                    f"{sizing_note}"
                 )
-            elif _fvg_candle_open > 0 and _fvg_candle_open < price:
-                fvg_stop = _fvg_candle_open * (1 - 0.003)
-                flat_stop = price * (1 - TRAILING_PERCENT / 100)
-                initial_stop = max(fvg_stop, flat_stop)
-                _stop_method = f"FVG (candle open ${_fvg_candle_open:,.6g})"
-            else:
-                initial_stop = price * (1 - TRAILING_PERCENT / 100)
-                _stop_method = f"flat {TRAILING_PERCENT:.1f}%"
-            main_tp_pct, main_tp_reason = _take_profit_percent_for_signal(signal)
-            take_profit_target = price * (1 + main_tp_pct / 100)
-            mode_label         = "LIVE BUY" if LIVE_ORDERS_ACTIVE else "PAPER BUY"
+                print(f"  {msg}")
+                send_discord_alert(msg)
+                continue
+
+            mode_label = "LIVE BUY" if LIVE_ORDERS_ACTIVE else "PAPER BUY"
 
             if LIVE_ORDERS_ACTIVE:
                 if LIVE_ALLOWED_PRODUCTS and product_id.upper() not in LIVE_ALLOWED_PRODUCTS:
@@ -2811,58 +3209,17 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
                     print(f"  [LIVE ORDER ERROR] {product_id}: {exc}")
                     continue  # skip position tracking if order failed
 
-            active_positions[product_id] = {
-                "product_id":             product_id,
-                "mode":                   "live" if LIVE_ORDERS_ACTIVE else "paper",
-                "entry_timestamp":        _utcnow_iso(),
-                "entry_price":            price,
-                "allocated_usd":          position_size,
-                "original_allocated_usd": position_size,
-                "simulated_qty":          crypto_qty,
-                "original_simulated_qty": crypto_qty,
-                "position_size_pct":      size_pct,
-                "highest_tracked_price":  price,
-                "current_trailing_stop":  initial_stop,
-                "take_profit_boundary":   take_profit_target,
-                "main_take_profit_percent": main_tp_pct,
-                "main_take_profit_reason": main_tp_reason,
-                "quick_take_profit_boundary": price * (1 + QUICK_TAKE_PROFIT_PERCENT / 100),
-                "quick_take_profit_taken": False,
-                "partial_take_profit_taken": False,
-                "quick_take_profit_sell_percent": QUICK_TAKE_PROFIT_SELL_PERCENT,
-                "take_profit_sell_percent": TAKE_PROFIT_SELL_PERCENT,
-                "moon_bag_percent":       MOON_BAG_PERCENT,
-            }
-
-            active_positions[product_id]["signal_score"] = prod.get("score", 0)
-            active_positions[product_id]["pre_breakout_score"] = prod.get("pre_breakout_score", 0)
-            active_positions[product_id]["pre_breakout_features"] = prod.get("pre_breakout_features", {})
-            active_positions[product_id]["entry_strategy"] = signal["strategy"]
-            active_positions[product_id]["entry_strategy_score"] = signal["score"]
-            active_positions[product_id]["entry_strategy_raw_score"] = signal.get("raw_score", signal["score"])
-            active_positions[product_id]["entry_strategy_features"] = signal["features"]
-            active_positions[product_id]["entry_confidence_level"] = signal.get("confidence_level", "SINGLE")
-            active_positions[product_id]["entry_consensus_count"] = signal.get("consensus_count", 1)
-            active_positions[product_id]["entry_confirming_strategies"] = signal.get("confirming_strategies", [signal["strategy"]])
-            active_positions[product_id]["orb_score"] = prod.get("orb_score", 0)
-            active_positions[product_id]["orb_features"] = prod.get("orb_features", {})
-            active_positions[product_id]["bollinger_score"] = prod.get("bollinger_score", 0)
-            active_positions[product_id]["bollinger_features"] = prod.get("bollinger_features", {})
-            active_positions[product_id]["wedge_score"] = prod.get("wedge_score", 0)
-            active_positions[product_id]["wedge_features"] = prod.get("wedge_features", {})
-            active_positions[product_id]["momentum_runner_score"] = prod.get("momentum_runner_score", 0)
-            active_positions[product_id]["momentum_runner_features"] = prod.get("momentum_runner_features", {})
-            active_positions[product_id]["mtf_scores"] = mtf_scores
-            active_positions[product_id]["dollar_volume_24h"] = liquidity.get("dollar_volume_24h", 0.0)
-            active_positions[product_id]["breakout_dollar_volume"] = liquidity.get("breakout_dollar_volume", 0.0)
-            active_positions[product_id]["obv"] = obv.get("metrics", {})
-            active_positions[product_id]["initial_stop_method"] = _stop_method
-            active_positions[product_id]["fvg_candle_open"] = _fvg_candle_open
-            active_positions[product_id]["entry_buy_zone_low"] = float(structure.get("buy_zone_low", 0.0) or 0.0)
-            active_positions[product_id]["entry_buy_zone_high"] = float(structure.get("buy_zone_high", 0.0) or 0.0)
-            active_positions[product_id]["entry_support_level"] = float(structure.get("support_level", 0.0) or 0.0)
-            active_positions[product_id]["entry_support_floor"] = float(structure.get("support_floor", 0.0) or 0.0)
-            active_positions[product_id]["entry_stop_distance_pct"] = float(structure.get("stop_distance_pct", 0.0) or 0.0)
+            entry_meta = _open_position_from_entry(
+                active_positions,
+                prod,
+                signal,
+                structure,
+                position_size,
+                price,
+                mtf_scores,
+                sizing_reasons,
+                entry_mode="market",
+            )
 
             confirming_strategies = signal.get("confirming_strategies", [signal["strategy"]])
             confidence_label = signal.get("confidence_level", "SINGLE")
@@ -2875,14 +3232,14 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
             confirming_str = " + ".join(s.replace("_", " ") for s in confirming_strategies)
             msg = (
                 f"{mode_emoji} [{mode_label}] {product_id}\n"
-                f"💵 Entry: ${price:,.6g}  |  Size: ${position_size:,.0f} ({size_pct}% · score {signal['score']:.0f})  |  Qty: {crypto_qty:.6g}\n"
+                f"💵 Entry: ${price:,.6g}  |  Size: ${position_size:,.0f} ({entry_meta['size_pct']}% · score {signal['score']:.0f})  |  Qty: {entry_meta['crypto_qty']:.6g}\n"
                 f"{conf_emoji} Score: {signal['score']:.0f}/100 [{confidence_label}]  (raw {raw_score:.0f}{bonus_str})\n"
                 f"   Strategy: {signal['strategy'].replace('_', ' ')}\n"
                 f"   Confirmed by: {confirming_str}\n"
                 f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  |  Runner {prod.get('momentum_runner_score', 0):.0f}  (all /100)\n"
-                f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%/{QUICK_TAKE_PROFIT_SELL_PERCENT:.0f}%  |  Main TP: ${take_profit_target:,.6g} (+{main_tp_pct:.0f}% {main_tp_reason})  |  Stop: ${initial_stop:,.6g} [{_stop_method}]\n"
+                f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%/{QUICK_TAKE_PROFIT_SELL_PERCENT:.0f}%  |  Main TP: ${entry_meta['take_profit_target']:,.6g} (+{entry_meta['main_tp_pct']:.0f}% {entry_meta['main_tp_reason']})  |  Stop: ${entry_meta['initial_stop']:,.6g} [{entry_meta['stop_method']}]\n"
                 f"💧 24h Vol: ${liquidity.get('dollar_volume_24h', 0.0):,.0f}  |  OBV: {obv.get('metrics', {}).get('obv_pressure_pct', 0.0):+.1f}%\n"
-                f"🏦 Budget used: ${_capital_deployed(active_positions):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions)}/{MAX_OPEN_POSITIONS} slots)"
+                f"🏦 Budget used: ${_capital_deployed(active_positions) + _pending_capital_reserved(pending_entries):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions) + len(pending_entries)}/{MAX_OPEN_POSITIONS} slots)"
                 f"{sizing_note}"
             )
             print(f"  {msg}")
@@ -2892,6 +3249,7 @@ def scan_and_execute_entries(client, active_positions: dict, products: list[dict
         send_shadow_signal_summary(shadow_candidates, budget_skip_reason)
 
     save_json_file(PORTFOLIO_FILE, active_positions)
+    save_json_file(PENDING_ENTRY_FILE, pending_entries)
 
 
 def calculate_atr_pct(product_id: str, candles: list[list] | None = None, period: int = ATR_PERIOD) -> float:
@@ -3963,9 +4321,14 @@ def run_trading_cycle(client) -> tuple[dict, dict]:
         return (load_json_file(PORTFOLIO_FILE) or {}, {})
 
     active_positions = load_json_file(PORTFOLIO_FILE)
+    pending_entries = load_json_file(PENDING_ENTRY_FILE)
     market_state = load_json_file(MARKET_STATE_FILE)
     daily_ledger = load_daily_ledger()
 
+    if not isinstance(active_positions, dict):
+        active_positions = {}
+    if not isinstance(pending_entries, dict):
+        pending_entries = {}
     if not isinstance(market_state, dict):
         market_state = {}
 
@@ -3975,8 +4338,24 @@ def run_trading_cycle(client) -> tuple[dict, dict]:
     if active_positions:
         manage_active_positions(client, active_positions, live_prices, daily_ledger)
 
-    scan_and_execute_entries(client, active_positions, products, market_state, daily_ledger)
+    products_by_id = {
+        str(prod.get("product_id") or ""): prod
+        for prod in products
+        if isinstance(prod, dict) and prod.get("product_id")
+    }
+    pending_entries, pending_changed = manage_pending_entries(
+        client,
+        active_positions,
+        pending_entries,
+        products_by_id,
+        live_prices,
+    )
+    if pending_changed:
+        save_json_file(PENDING_ENTRY_FILE, pending_entries)
+
+    scan_and_execute_entries(client, active_positions, pending_entries, products, market_state, daily_ledger)
     save_json_file(DAILY_PNL_FILE, daily_ledger)
+    save_json_file(PENDING_ENTRY_FILE, pending_entries)
 
     # Persist a read-only ranked snapshot of current opportunities (same strategy
     # stack the engine trades on) so the dashboard's Crypto Scalp tab can render

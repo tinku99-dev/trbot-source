@@ -372,6 +372,7 @@ def fresh_start_paper_trading(trader: Any, archive_open_positions: bool = True) 
 
     history = trader.load_json_file(trader.HISTORY_FILE)
     daily_ledger = trader.load_json_file(trader.DAILY_PNL_FILE)
+    pending_entries = trader.load_json_file(trader.PENDING_ENTRY_FILE)
     backups_written: List[str] = []
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -385,8 +386,13 @@ def fresh_start_paper_trading(trader: Any, archive_open_positions: bool = True) 
         backup_name = f"daily_pnl_fresh_start_backup_{stamp}.json"
         trader.save_json_file(backup_name, daily_ledger)
         backups_written.append(backup_name)
+    if isinstance(pending_entries, dict) and pending_entries:
+        backup_name = f"pending_entries_fresh_start_backup_{stamp}.json"
+        trader.save_json_file(backup_name, pending_entries)
+        backups_written.append(backup_name)
 
     trader.save_json_file(trader.PORTFOLIO_FILE, {})
+    trader.save_json_file(trader.PENDING_ENTRY_FILE, {})
     trader.save_json_file(trader.HISTORY_FILE, [])
     trader.save_json_file(
         trader.DAILY_PNL_FILE,
@@ -1469,9 +1475,12 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
         # separate summary-only loader can silently fall back to an empty local
         # file after clean deploys, while the real portfolio blob still has data.
         active_positions = trader.load_json_file(trader.PORTFOLIO_FILE)
+        pending_entries = trader.load_json_file(trader.PENDING_ENTRY_FILE)
         history = trader.load_json_file(trader.HISTORY_FILE)
         if not isinstance(active_positions, dict):
             active_positions = {}
+        if not isinstance(pending_entries, dict):
+            pending_entries = {}
         if not isinstance(history, list):
             history = []
 
@@ -1498,6 +1507,7 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
         losses = len(closed) - wins
 
         open_positions = []
+        pending_orders = []
         unrealized_total = 0.0
         total_invested_usd = 0.0
         open_market_value_usd = 0.0
@@ -1537,6 +1547,28 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
                 "partialTakeProfitTaken": bool(position.get("partial_take_profit_taken", False)),
                 "unrealizedPnlUsd": round(pnl, 2),
                 "unrealizedPnlPct": round(pnl_pct, 2),
+            })
+
+        pending_reserved_usd = 0.0
+        for product_id, order in pending_entries.items():
+            allocated = float(order.get("allocated_usd", trader.CAPITAL_PER_TRADE_USD) or 0.0)
+            pending_reserved_usd += allocated
+            pending_orders.append({
+                "productId": product_id,
+                "mode": order.get("mode", "paper"),
+                "entryStyle": order.get("entry_style", "limit_retest"),
+                "createdAtUtc": order.get("created_at", ""),
+                "expiresAtUtc": order.get("expires_at", ""),
+                "signalPriceUsd": float(order.get("signal_price", 0.0) or 0.0),
+                "limitPriceUsd": float(order.get("limit_price", 0.0) or 0.0),
+                "allocatedUsd": round(allocated, 2),
+                "supportLevelUsd": float(order.get("support_level", 0.0) or 0.0),
+                "supportFloorUsd": float(order.get("support_floor", 0.0) or 0.0),
+                "buyZoneLowUsd": float(order.get("buy_zone_low", 0.0) or 0.0),
+                "buyZoneHighUsd": float(order.get("buy_zone_high", 0.0) or 0.0),
+                "strategy": str((order.get("signal") or {}).get("strategy", "")),
+                "strategyScore": float((order.get("signal") or {}).get("score", 0.0) or 0.0),
+                "confidenceLevel": str((order.get("signal") or {}).get("confidence_level", "")),
             })
 
         # Also add total invested from closed history trades that are fully exited
@@ -1633,7 +1665,8 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
         )[:max_trades]
         allocated_total = sum(p["allocatedUsd"] for p in open_positions)
         starting_capital_usd = float(trader.TOTAL_CAPITAL_USD)
-        available_cash_usd = starting_capital_usd + realized_total - allocated_total
+        reserved_total_usd = allocated_total + pending_reserved_usd
+        available_cash_usd = starting_capital_usd + realized_total - reserved_total_usd
         total_equity_usd = available_cash_usd + open_market_value_usd
 
         payload = {
@@ -1648,10 +1681,13 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
                 "winRatePct": round((wins / len(closed) * 100), 2) if closed else 0.0,
                 "realizedPnlUsd": round(realized_total, 2),
                 "openPositions": len(open_positions),
+                "pendingEntries": len(pending_orders),
                 "unrealizedPnlUsd": round(unrealized_total, 2),
                 "totalPnlUsd": round(realized_total + unrealized_total, 2),
                 "startingCapitalUsd": round(starting_capital_usd, 2),
                 "allocatedUsd": round(allocated_total, 2),
+                "pendingReservedUsd": round(pending_reserved_usd, 2),
+                "reservedUsd": round(reserved_total_usd, 2),
                 "availableCashUsd": round(available_cash_usd, 2),
                 "openMarketValueUsd": round(open_market_value_usd, 2),
                 "totalEquityUsd": round(total_equity_usd, 2),
@@ -1662,6 +1698,7 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
             "daily": daily_rows,
             "rollingWindows": rolling_windows,
             "openPositions": open_positions,
+            "pendingEntries": pending_orders,
             "recentClosedTrades": [_flatten_trade(t) for t in recent_closed],
         }
         return func.HttpResponse(json.dumps(payload), status_code=200, mimetype="application/json")
