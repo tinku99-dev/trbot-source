@@ -1,8 +1,15 @@
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from email.utils import formatdate
 from typing import Any, Dict, List
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 
 import azure.functions as func
 import numpy as np
@@ -52,6 +59,78 @@ BOLLINGER_MAX_DISTANCE_FROM_MID_PCT = float(os.environ.get("BOLLINGER_MAX_DISTAN
 
 def get_storage_connection_string() -> str:
     return os.environ.get("STATE_STORAGE_CONNECTION_STRING") or os.environ.get("AzureWebJobsStorage", "")
+
+
+def _parse_storage_connection_string(conn_str: str) -> Dict[str, str]:
+    parts: Dict[str, str] = {}
+    for item in conn_str.split(";"):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        parts[key] = value
+    return parts
+
+
+def _list_blob_names_rest(conn_str: str, container_name: str, prefix: str) -> List[Dict[str, Any]]:
+    parts = _parse_storage_connection_string(conn_str)
+    account = parts.get("AccountName", "")
+    account_key = parts.get("AccountKey", "")
+    endpoint_suffix = parts.get("EndpointSuffix", "core.windows.net")
+    if not account or not account_key:
+        raise RuntimeError("Storage connection string is missing AccountName or AccountKey.")
+
+    query = urllib.parse.urlencode({
+        "restype": "container",
+        "comp": "list",
+        "prefix": prefix,
+    })
+    url = f"https://{account}.blob.{endpoint_suffix}/{container_name}?{query}"
+    x_ms_date = formatdate(usegmt=True)
+    x_ms_version = "2023-11-03"
+    headers = {
+        "x-ms-date": x_ms_date,
+        "x-ms-version": x_ms_version,
+    }
+    canonicalized_headers = "".join(
+        f"{key}:{headers[key]}\n"
+        for key in sorted(headers)
+        if key.lower().startswith("x-ms-")
+    )
+    canonicalized_resource = (
+        f"/{account}/{container_name}\n"
+        f"comp:list\n"
+        f"prefix:{prefix}\n"
+        f"restype:container"
+    )
+    string_to_sign = (
+        "GET\n\n\n\n\n\n\n\n\n\n\n\n"
+        f"{canonicalized_headers}{canonicalized_resource}"
+    )
+    signature = base64.b64encode(
+        hmac.new(
+            base64.b64decode(account_key),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii")
+    headers["Authorization"] = f"SharedKey {account}:{signature}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(request, timeout=20) as response:
+        raw = response.read()
+
+    root = ET.fromstring(raw)
+    out: List[Dict[str, Any]] = []
+    for blob in root.findall(".//Blob"):
+        name_el = blob.find("Name")
+        if name_el is None or not name_el.text:
+            continue
+        last_modified_el = blob.find("Properties/Last-Modified")
+        out.append({
+            "name": name_el.text,
+            "last_modified": last_modified_el.text if last_modified_el is not None else "",
+            "loader": "rest",
+        })
+    return out
 
 
 def load_json_state(blob_name: str, file_path: str, default_value: Any) -> Any:
@@ -390,15 +469,17 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> Dict[str
                 "history": history,
             })
 
-    blob_sources: List[Any] = []
+    blob_sources: List[Dict[str, Any]] = []
     conn_str = getattr(trader, "_BLOB_CONN_STR", "")
     container_name = getattr(trader, "_BLOB_CONTAINER", STATE_CONTAINER_NAME)
     backup_prefix = getattr(trader, "_STATE_BACKUP_PREFIX", "trader-state-backups")
 
-    if BlobServiceClient and conn_str and max_backups > 0:
+    if conn_str and max_backups > 0:
         try:
-            service_client = BlobServiceClient.from_connection_string(conn_str)
-            container = service_client.get_container_client(container_name)
+            container = None
+            if BlobServiceClient:
+                service_client = BlobServiceClient.from_connection_string(conn_str)
+                container = service_client.get_container_client(container_name)
             seen_blob_names = set()
             prefixes = (
                 "trader-state/trading_history_fresh_start_backup_",
@@ -407,8 +488,20 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> Dict[str
             )
             debug["blobPrefixesScanned"] = list(prefixes)
             for prefix in prefixes:
-                for blob in container.list_blobs(name_starts_with=prefix):
-                    name = getattr(blob, "name", "")
+                if container is not None:
+                    candidates = [
+                        {
+                            "name": getattr(blob, "name", ""),
+                            "last_modified": getattr(blob, "last_modified", None),
+                            "loader": "sdk",
+                        }
+                        for blob in container.list_blobs(name_starts_with=prefix)
+                    ]
+                else:
+                    candidates = _list_blob_names_rest(conn_str, container_name, prefix)
+
+                for blob in candidates:
+                    name = str(blob.get("name", "") or "")
                     if not name or name in seen_blob_names:
                         continue
                     if prefix == f"{backup_prefix}/" and "/trading_history.json/" not in name:
@@ -421,28 +514,32 @@ def _load_pattern_review_sources(trader: Any, max_backups: int = 20) -> Dict[str
 
             blob_sources.sort(
                 key=lambda blob: (
-                    getattr(blob, "last_modified", None) or datetime.min.replace(tzinfo=timezone.utc),
-                    getattr(blob, "name", ""),
+                    str(blob.get("last_modified") or ""),
+                    blob.get("name", ""),
                 ),
                 reverse=True,
             )
 
             for blob in blob_sources[:max_backups]:
-                blob_name = getattr(blob, "name", "")
+                blob_name = str(blob.get("name", "") or "")
                 try:
-                    payload = container.get_blob_client(blob_name).download_blob().readall().decode("utf-8")
+                    if container is not None:
+                        payload = container.get_blob_client(blob_name).download_blob().readall().decode("utf-8")
+                    else:
+                        payload = trader._blob_rest_request("GET", blob_name).decode("utf-8")
                     history = json.loads(payload)
                 except Exception as exc:
                     logging.warning("Pattern review backup load failed for %s: %s", blob_name, exc)
                     continue
                 if isinstance(history, list):
+                    last_modified = blob.get("last_modified")
                     sources.append({
                         "name": blob_name,
-                        "kind": "backup",
+                        "kind": f"backup_{blob.get('loader', 'unknown')}",
                         "lastModifiedUtc": (
-                            getattr(blob, "last_modified", None).isoformat()
-                            if getattr(blob, "last_modified", None)
-                            else ""
+                            last_modified.isoformat()
+                            if hasattr(last_modified, "isoformat")
+                            else str(last_modified or "")
                         ),
                         "tradeCount": len(history),
                         "history": history,
