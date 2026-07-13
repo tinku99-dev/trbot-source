@@ -923,6 +923,9 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
   const rows = report?.[resultKey] || report?.[resultKey?.[0]?.toUpperCase() + resultKey?.slice(1)] || []
   const rejected = report?.rejected || report?.Rejected || []
   const movers = report?.screenedMovers || report?.ScreenedMovers || []
+  const optionRows = rows
+    .map((row) => ({ row, option: pick(row, 'option', 'Option') }))
+    .filter((item) => item.option)
 
   return (
     <section className="tool-page">
@@ -953,6 +956,38 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
             {rows.length ? <SummaryTable rows={rows} mode="candidates" /> : <EmptyState title={emptyTitle} text="The function completed, but no names met the current filters." />}
           </Panel>
 
+          {modeSupportsOptions(resultKey) && (
+            <Panel title="Lotto Options Ideas" meta={optionRows.length ? `${optionRows.length} contracts` : 'No contracts'}>
+              {optionRows.length ? (
+                <div className="lotto-ideas">
+                  {optionRows.map(({ row, option }, index) => {
+                    const symbol = pick(row, 'symbol', 'Symbol') || '—'
+                    const score = pick(row, 'score', 'Score')
+                    const buyLow = pick(row, 'buyRangeLow', 'BuyRangeLow')
+                    const buyHigh = pick(row, 'buyRangeHigh', 'BuyRangeHigh')
+                    const target1 = pick(row, 'target1', 'Target1')
+                    const target2 = pick(row, 'target2', 'Target2')
+                    return (
+                      <article className="lotto-idea-card" key={`${symbol}-${index}`}>
+                        <div>
+                          <strong>{symbol}</strong>
+                          <span>Score {formatNumber(score, 1)}</span>
+                        </div>
+                        <p>{option}</p>
+                        <small>Buy range {formatPrice(buyLow)} - {formatPrice(buyHigh)} | Targets {formatPrice(target1)} / {formatPrice(target2)}</small>
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <EmptyState
+                  title="No lotto options yet"
+                  text="Options ideas appear here when Research Summary returns a stock candidate with an options-worthy setup and a liquid contract. Crypto candidates do not have options contracts."
+                />
+              )}
+            </Panel>
+          )}
+
           {rejected.length > 0 && (
             <Panel title="Rejected Watchlist" meta={`${rejected.length} names`}>
               <SummaryTable rows={rejected} mode="rejected" />
@@ -962,6 +997,10 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
       )}
     </section>
   )
+}
+
+function modeSupportsOptions(resultKey) {
+  return resultKey === 'candidates'
 }
 
 function SummaryTable({ rows, mode }) {
