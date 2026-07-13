@@ -857,6 +857,7 @@ function ScalpTable({ rows, showReason }) {
             <th>Conf.</th>
             <th>Strategy</th>
             <th>Price</th>
+            <th>Buy Range</th>
             <th>Stop</th>
             <th>Targets</th>
             {showReason ? <th>Gate</th> : <th>Confirmed by</th>}
@@ -870,6 +871,9 @@ function ScalpTable({ rows, showReason }) {
               .replace(/24h dollar volume \$[\d,]+ < \$[\d,]+/g, 'low volume')
               .replace(/breakout candle volume \$[\d,]+ < \$[\d,]+/g, 'thin breakout')
               .replace(/OBV pressure [-\d.]+% < [-\d.]+%/g, 'weak OBV')
+            const buyLow = row.buy_range_low || row.buyRangeLow || row.price
+            const buyHigh = row.buy_range_high || row.buyRangeHigh || row.price
+            const stopLoss = row.stop_loss || row.stopLoss || (row.price ? row.price * 0.95 : 0)
             return (
               <tr key={`${row.symbol}-${index}`}>
                 <td className="strong">
@@ -880,7 +884,8 @@ function ScalpTable({ rows, showReason }) {
                 <td>{row.confidence_level}</td>
                 <td>{String(row.strategy || '').replace(/_/g, ' ')}</td>
                 <td>{formatPrice(row.price)}</td>
-                <td>{formatPrice(row.stop_loss)}</td>
+                <td>{formatPrice(buyLow)} - {formatPrice(buyHigh)}</td>
+                <td>{stopLoss > 0 ? formatPrice(stopLoss) : '—'}</td>
                 <td>{formatPrice(row.target1)} / {formatPrice(row.target2)}</td>
                 {showReason ? (
                   <td>{reasonShort || 'Filtered'}</td>

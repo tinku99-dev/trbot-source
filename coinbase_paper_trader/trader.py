@@ -2747,7 +2747,8 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
 
         eligible = signal["eligible"] and liquidity["ok"] and obv["ok"] and structure["ok"]
         liquidity_ok = liquidity["ok"]
-        stop_loss = float(structure.get("stop_loss", 0.0) or 0.0) if structure["ok"] else price * (1 - TRAILING_PERCENT / 100)
+        structural_stop = float(structure.get("stop_loss", 0.0) or 0.0)
+        stop_loss = structural_stop if 0 < structural_stop < price else price * (1 - TRAILING_PERCENT / 100)
         target_pct, target_reason = _take_profit_percent_for_signal(signal)
         target1 = price * (1 + target_pct / 100)
         target2 = price * (1 + (target_pct * 2) / 100)
