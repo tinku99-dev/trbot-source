@@ -183,6 +183,13 @@ function formatDateTime(value) {
   })
 }
 
+function formatFunctionError(title, status) {
+  if (status === 401 || status === 403) {
+    return `${title} rejected the Function key. Use the key from the .NET Research Bot Function App (func-3qs3shmnmkj5m), not the paper trader key.`
+  }
+  return `${title} returned ${status}`
+}
+
 function pick(row, ...keys) {
   for (const key of keys) {
     if (row && row[key] !== undefined && row[key] !== null) return row[key]
@@ -559,7 +566,7 @@ function TickerAnalyzer({ apiKey, functionUrl, onOpenSettings }) {
       setError('')
       setAnalysis(null)
       const response = await fetch(`${functionUrl}/api/analyze/${encodeURIComponent(symbol.trim().toUpperCase())}?code=${apiKey}`)
-      if (!response.ok) throw new Error(`AnalyzeTicker returned ${response.status}`)
+      if (!response.ok) throw new Error(formatFunctionError('AnalyzeTicker', response.status))
       setAnalysis(await response.json())
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to analyze ticker.')
@@ -904,7 +911,7 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
       setLoading(true)
       setError('')
       const response = await fetch(`${functionUrl}/api/${endpoint}?code=${apiKey}`, { method: 'GET', cache: 'no-store' })
-      if (!response.ok) throw new Error(`${title} returned ${response.status}`)
+      if (!response.ok) throw new Error(formatFunctionError(title, response.status))
       setReport(await response.json())
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : `Failed to load ${title.toLowerCase()}.`)
@@ -1077,15 +1084,15 @@ function SettingsModal({ apiKey, onSave, onClose }) {
           <button type="button" className="ghost-button" onClick={onClose}>Close</button>
         </div>
         <div className="modal-body">
-          <label htmlFor="api-key">trbot Function key</label>
+          <label htmlFor="api-key">Research Bot Function key</label>
           <input
             id="api-key"
             type="password"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder="Paste the AnalyzeTicker function key"
+            placeholder="Paste the func-3qs3shmnmkj5m function key"
           />
-          <p>The key is stored only in this browser local storage and is used for Analyze Ticker, Research Summary, and Crypto Scalp.</p>
+          <p>The key is stored only in this browser local storage and is used for Analyze Ticker, Research Summary, and Crypto Scalp. Paper trading uses a different Function App key.</p>
           <button type="button" onClick={() => onSave(draft.trim())}>Save Key</button>
         </div>
       </div>
