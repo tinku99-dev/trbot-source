@@ -21,25 +21,64 @@ const strategyPlaybook = [
     bestFor: 'Trend continuation after a clean range break',
     confirms: ['Close above resistance', 'Retest holds support', 'Volume expands', 'OBV accumulation'],
     avoid: ['Buying the first wick', 'Retest closes below support', 'Breakout without volume'],
+    crypto: {
+      confirm: 'Altcoin volume expansion plus BTC stability. If BTC is dropping, the retest is lower quality.',
+      avoid: 'Liquidation hunts around the old resistance line; give stops room and reduce size.',
+    },
+    stocks: {
+      confirm: 'Sector ETF alignment, such as XLK for tech or XLF for financials, should also show strength.',
+      avoid: 'Pre-market fakeouts. Count only regular-session breakouts after the official open.',
+    },
   },
   {
     title: 'Opening Range Breakout',
     bestFor: 'Early session momentum in liquid names',
     confirms: ['Range high breaks', 'Price stays above VWAP', 'ADX confirms trend', 'BTC or market regime agrees'],
     avoid: ['Chop inside the range', 'Weak relative strength', 'Immediate reversal back into range'],
+    crypto: {
+      confirm: 'Use a synthetic open: 00:00 UTC or 13:30 UTC, with a 1-hour range for cleaner crypto structure.',
+      avoid: 'Weekend grind. Saturday/Sunday ORB is skipped by default because liquidity is thinner.',
+    },
+    stocks: {
+      confirm: 'First 15-30 minutes after 9:30 AM ET with volume above the 20-day average.',
+      avoid: 'Earnings or major catalyst mornings where spreads and whipsaws are unusually wide.',
+    },
   },
   {
     title: 'Bollinger Reversal',
     bestFor: 'Snapback from exhaustion lows',
     confirms: ['Lower-band pierce', 'RSI or MFI recovering', 'Close back inside bands', 'Support nearby'],
     avoid: ['Falling knife with no reclaim', 'Heavy distribution volume', 'Below major moving averages'],
+    crypto: {
+      confirm: 'Volume climax on the lower-band pierce. Crypto can ride the lower band for days without capitulation.',
+      avoid: 'Low-cap or illiquid alts. Mean reversion needs real liquidity to bounce.',
+    },
+    stocks: {
+      confirm: 'Daily or weekly support confluence with a 50, 100, or 200 SMA, or a multi-month floor.',
+      avoid: 'Drops caused by analyst downgrades, weak filings, earnings misses, or regulatory news.',
+    },
   },
   {
     title: 'Momentum Runner',
     bestFor: 'High-liquidity coins or stocks already moving with participation',
     confirms: ['24h or daily move is strong', 'Recent dollar volume is high', 'Higher lows continue', 'Trailing stop has room'],
     avoid: ['Thin volume spikes', 'Overextended candle far above support', 'Late entry after parabolic move'],
+    crypto: {
+      confirm: 'Narrative participation and social volume can matter; favor current themes with real liquidity.',
+      avoid: 'The 3-day rule. Do not chase after multiple massive green daily candles in a row.',
+    },
+    stocks: {
+      confirm: 'Relative strength versus SPY or QQQ: the stock should hold highs even when the index is flat or red.',
+      avoid: 'Imminent dilution risk, repeated offerings, or lock-up expiration pressure.',
+    },
   },
+]
+
+const strategyCheatSheet = [
+  ['Breakout Retest', 'BTC stable; wider stops for liquidation sweeps.', 'Sector ETF agreement; ignore pre-market moves.'],
+  ['ORB', 'Use 00:00 UTC or 13:30 UTC anchor; skip weekends.', 'Trade the 9:30 AM ET bell with volume confirmation.'],
+  ['Bollinger Reversal', 'Require capitulation volume; avoid illiquid alts.', 'Require major SMA or horizontal support confluence.'],
+  ['Momentum Runner', 'Track narrative strength; avoid after 3 extended green days.', 'Demand relative strength versus SPY/QQQ and avoid dilution risk.'],
 ]
 
 const indicatorGuide = [
@@ -604,8 +643,43 @@ function ResearchPlaybook() {
               <ul>
                 {item.avoid.map((point) => <li key={point}>{point}</li>)}
               </ul>
+              <div className="asset-rule-grid">
+                <div>
+                  <span>Crypto</span>
+                  <p><b>Confirm:</b> {item.crypto.confirm}</p>
+                  <p><b>Avoid:</b> {item.crypto.avoid}</p>
+                </div>
+                <div>
+                  <span>Stocks</span>
+                  <p><b>Confirm:</b> {item.stocks.confirm}</p>
+                  <p><b>Avoid:</b> {item.stocks.avoid}</p>
+                </div>
+              </div>
             </article>
           ))}
+        </div>
+      </Panel>
+
+      <Panel title="Asset-Class Cheat Sheet" meta="Crypto vs stocks">
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Strategy</th>
+                <th>Crypto Modifier</th>
+                <th>Stock Modifier</th>
+              </tr>
+            </thead>
+            <tbody>
+              {strategyCheatSheet.map(([strategy, crypto, stocks]) => (
+                <tr key={strategy}>
+                  <td className="strong">{strategy}</td>
+                  <td>{crypto}</td>
+                  <td>{stocks}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </Panel>
 

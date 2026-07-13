@@ -87,7 +87,8 @@ COINBASE_PUBLIC_BASE    = "https://api.exchange.coinbase.com"
 # daylight-saving time; override ORB_SESSION_START_UTC when needed.
 ORB_ENABLED             = os.environ.get("ORB_ENABLED", "true").lower() == "true"
 ORB_SESSION_START_UTC   = os.environ.get("ORB_SESSION_START_UTC", "13:30")
-ORB_RANGE_MINUTES       = int(os.environ.get("ORB_RANGE_MINUTES", "15"))
+ORB_RANGE_MINUTES       = int(os.environ.get("ORB_RANGE_MINUTES", "60"))
+ORB_SKIP_WEEKENDS       = os.environ.get("ORB_SKIP_WEEKENDS", "true").lower() == "true"
 ORB_MIN_SCORE_TO_BUY    = float(os.environ.get("ORB_MIN_SCORE_TO_BUY", "80"))
 ORB_BREAKOUT_BUFFER_PCT = float(os.environ.get("ORB_BREAKOUT_BUFFER_PCT", "0.10"))
 ORB_MAX_OVEREXTENSION   = float(os.environ.get("ORB_MAX_OVEREXTENSION", "1.50"))
@@ -120,6 +121,7 @@ BOLLINGER_STDDEV        = float(os.environ.get("BOLLINGER_STDDEV", "2.0"))
 BOLLINGER_MIN_SCORE_TO_BUY = float(os.environ.get("BOLLINGER_MIN_SCORE_TO_BUY", "80"))
 BOLLINGER_MIN_EXTREME_PCT  = float(os.environ.get("BOLLINGER_MIN_EXTREME_PCT", "0.20"))
 BOLLINGER_MAX_DISTANCE_FROM_MID_PCT = float(os.environ.get("BOLLINGER_MAX_DISTANCE_FROM_MID_PCT", "4.0"))
+BOLLINGER_VOLUME_CLIMAX_RATIO = float(os.environ.get("BOLLINGER_VOLUME_CLIMAX_RATIO", "2.2"))
 
 # Descending-wedge breakout + RSI bullish divergence (uses 1h candles).
 # A descending wedge forms when both highs and lows trend down but highs fall
@@ -1236,6 +1238,17 @@ def detect_orb_signal(product_id: str, candles: list[list] | None = None) -> dic
 
     range_seconds = max(CANDLE_GRANULARITY, ORB_RANGE_MINUTES * 60)
     session_start = _current_or_previous_session_start()
+    session_dt = datetime.fromtimestamp(session_start, timezone.utc)
+    if ORB_SKIP_WEEKENDS and session_dt.weekday() >= 5:
+        return {
+            "orb_score": 0.0,
+            "features": {
+                "strategy": "ORB_WEEKEND_SKIPPED",
+                "session_start_utc": session_dt.isoformat(),
+                "range_minutes": ORB_RANGE_MINUTES,
+                "reason": "weekend volume/chop filter",
+            },
+        }
     range_end = session_start + range_seconds
     range_candles = [c for c in candles if session_start <= int(c[0]) < range_end]
     post_candles = [c for c in candles if int(c[0]) >= range_end]
@@ -1534,7 +1547,8 @@ def detect_bollinger_reversal_signal(product_id: str, candles: list[list] | None
         score += 15
     elif distance_to_mid_pct > 0:
         score += 8
-    if volume_ratio >= 1.8:
+    volume_climax = volume_ratio >= BOLLINGER_VOLUME_CLIMAX_RATIO
+    if volume_ratio >= BOLLINGER_VOLUME_CLIMAX_RATIO:
         score += 15
     elif volume_ratio >= 1.2:
         score += 8
@@ -1543,6 +1557,8 @@ def detect_bollinger_reversal_signal(product_id: str, candles: list[list] | None
 
     if upper_extension_pct > 0 and lower_extension_pct <= 0:
         score = 0.0
+    if reclaimed_lower and not volume_climax:
+        score = min(score, 60.0)
 
     features = {
         "strategy": "BOLLINGER_LOWER_SNAPBACK" if score > 0 else "BOLLINGER_UPPER_EXTENSION_OR_NO_LONG_TRIGGER",
@@ -1556,6 +1572,8 @@ def detect_bollinger_reversal_signal(product_id: str, candles: list[list] | None
         "reclaimed_lower_band": reclaimed_lower,
         "distance_to_mid_pct": round(distance_to_mid_pct, 3),
         "volume_ratio": round(volume_ratio, 2),
+        "volume_climax": volume_climax,
+        "volume_climax_required": BOLLINGER_VOLUME_CLIMAX_RATIO,
         "candle_move_pct": round(candle_move_pct, 3),
         "bollinger_signal_dollar_volume": round(close * volume, 2),
     }

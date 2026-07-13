@@ -414,6 +414,35 @@ input:focus {
   font-size: 13px;
 }
 
+.asset-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.asset-rule-grid div {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(247, 241, 227, 0.46);
+}
+
+.asset-rule-grid span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.asset-rule-grid p {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
 .indicator-guide {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -674,6 +703,7 @@ small {
   .indicator-grid,
   .research-grid,
   .indicator-guide,
+  .asset-rule-grid,
   .report-metrics {
     grid-template-columns: 1fr;
   }
