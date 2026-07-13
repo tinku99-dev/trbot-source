@@ -923,6 +923,12 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
   const rows = report?.[resultKey] || report?.[resultKey?.[0]?.toUpperCase() + resultKey?.slice(1)] || []
   const rejected = report?.rejected || report?.Rejected || []
   const movers = report?.screenedMovers || report?.ScreenedMovers || []
+  const separatedCandidates = modeSupportsOptions(resultKey)
+  const stockRows = separatedCandidates ? rows.filter((row) => isAssetClass(row, 'stock')) : rows
+  const cryptoRows = separatedCandidates ? rows.filter((row) => isAssetClass(row, 'crypto')) : []
+  const otherRows = separatedCandidates
+    ? rows.filter((row) => !isAssetClass(row, 'stock') && !isAssetClass(row, 'crypto'))
+    : []
   const optionRows = rows
     .map((row) => ({ row, option: pick(row, 'option', 'Option') }))
     .filter((item) => item.option)
@@ -952,11 +958,29 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
             </Panel>
           )}
 
-          <Panel title="Candidates" meta={`${rows.length} shown`}>
-            {rows.length ? <SummaryTable rows={rows} mode="candidates" /> : <EmptyState title={emptyTitle} text="The function completed, but no names met the current filters." />}
-          </Panel>
+          {separatedCandidates ? (
+            <>
+              <Panel title="Stock Candidates" meta={`${stockRows.length} shown`}>
+                {stockRows.length ? <SummaryTable rows={stockRows} mode="candidates" /> : <EmptyState title="No stock candidates" text="The function completed, but no stock names met the current filters." />}
+              </Panel>
 
-          {modeSupportsOptions(resultKey) && (
+              <Panel title="Crypto Candidates" meta={`${cryptoRows.length} shown`}>
+                {cryptoRows.length ? <SummaryTable rows={cryptoRows} mode="candidates" /> : <EmptyState title="No crypto candidates" text="The function completed, but no crypto names met the current filters." />}
+              </Panel>
+
+              {otherRows.length > 0 && (
+                <Panel title="Other Candidates" meta={`${otherRows.length} shown`}>
+                  <SummaryTable rows={otherRows} mode="candidates" />
+                </Panel>
+              )}
+            </>
+          ) : (
+            <Panel title="Candidates" meta={`${rows.length} shown`}>
+              {rows.length ? <SummaryTable rows={rows} mode="candidates" /> : <EmptyState title={emptyTitle} text="The function completed, but no names met the current filters." />}
+            </Panel>
+          )}
+
+          {separatedCandidates && (
             <Panel title="Lotto Options Ideas" meta={optionRows.length ? `${optionRows.length} contracts` : 'No contracts'}>
               {optionRows.length ? (
                 <div className="lotto-ideas">
@@ -1003,6 +1027,10 @@ function modeSupportsOptions(resultKey) {
   return resultKey === 'candidates'
 }
 
+function isAssetClass(row, assetClass) {
+  return String(pick(row, 'assetClass', 'AssetClass') || '').toLowerCase() === assetClass
+}
+
 function SummaryTable({ rows, mode }) {
   return (
     <div className="table-wrap">
@@ -1017,7 +1045,6 @@ function SummaryTable({ rows, mode }) {
             {mode !== 'movers' && <th>Buy Range</th>}
             {mode !== 'movers' && <th>Stop</th>}
             {mode !== 'movers' && <th>Targets</th>}
-            {mode === 'candidates' && <th>Options Research</th>}
             {mode === 'rejected' && <th>Reason</th>}
             {mode !== 'rejected' && mode !== 'movers' && <th>Signals</th>}
           </tr>
@@ -1034,7 +1061,6 @@ function SummaryTable({ rows, mode }) {
             const stop = pick(row, 'stopLoss', 'StopLoss')
             const target1 = pick(row, 'target1', 'Target1')
             const target2 = pick(row, 'target2', 'Target2')
-            const option = pick(row, 'option', 'Option')
             const reason = pick(row, 'reason', 'Reason')
             const signals = pick(row, 'signals', 'Signals') || []
             const patterns = pick(row, 'patterns', 'Patterns') || []
@@ -1048,7 +1074,6 @@ function SummaryTable({ rows, mode }) {
                 {mode !== 'movers' && <td>{formatPrice(buyLow)} - {formatPrice(buyHigh)}</td>}
                 {mode !== 'movers' && <td>{formatPrice(stop)}</td>}
                 {mode !== 'movers' && <td>{formatPrice(target1)} / {formatPrice(target2)}</td>}
-                {mode === 'candidates' && <td>{option ? <span className="option-idea">{option}</span> : <span className="muted-text">No liquid contract</span>}</td>}
                 {mode === 'rejected' && <td>{reason || 'Filtered'}</td>}
                 {mode !== 'rejected' && mode !== 'movers' && <td>{[...signals, ...patterns].slice(0, 3).join(', ') || 'Setup'}</td>}
               </tr>
