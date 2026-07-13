@@ -144,6 +144,13 @@ function formatDateTime(value) {
   })
 }
 
+function pick(row, ...keys) {
+  for (const key of keys) {
+    if (row && row[key] !== undefined && row[key] !== null) return row[key]
+  }
+  return undefined
+}
+
 function pnlClass(value) {
   const number = Number(value || 0)
   if (number > 0) return 'positive'
@@ -832,9 +839,9 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
     }
   }
 
-  const rows = report?.[resultKey] || []
-  const rejected = report?.rejected || []
-  const movers = report?.screenedMovers || []
+  const rows = report?.[resultKey] || report?.[resultKey?.[0]?.toUpperCase() + resultKey?.slice(1)] || []
+  const rejected = report?.rejected || report?.Rejected || []
+  const movers = report?.screenedMovers || report?.ScreenedMovers || []
 
   return (
     <section className="tool-page">
@@ -896,21 +903,37 @@ function SummaryTable({ rows, mode }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => (
-            <tr key={`${row.symbol}-${index}`}>
-              <td className="strong">{row.symbol}</td>
-              {mode !== 'movers' && <td>{formatNumber(row.score, 1)}</td>}
-              {mode !== 'movers' && <td>{row.tierLabel || row.tier || row.conviction || 'Candidate'}</td>}
-              {mode === 'movers' && <td>{formatPrice(row.price)}</td>}
-              {mode === 'movers' && <td className={pnlClass(row.changePct)}>{formatPercent(row.changePct)}</td>}
-              {mode !== 'movers' && <td>{formatPrice(row.buyRangeLow)} – {formatPrice(row.buyRangeHigh)}</td>}
-              {mode !== 'movers' && <td>{formatPrice(row.stopLoss)}</td>}
-              {mode !== 'movers' && <td>{formatPrice(row.target1)} / {formatPrice(row.target2)}</td>}
-              {mode === 'candidates' && <td>{row.option ? <span className="option-idea">{row.option}</span> : <span className="muted-text">No liquid contract</span>}</td>}
-              {mode === 'rejected' && <td>{row.reason || 'Filtered'}</td>}
-              {mode !== 'rejected' && mode !== 'movers' && <td>{[...(row.signals || []), ...(row.patterns || [])].slice(0, 3).join(', ') || 'Setup'}</td>}
-            </tr>
-          ))}
+          {rows.map((row, index) => {
+            const symbol = pick(row, 'symbol', 'Symbol') || '—'
+            const score = pick(row, 'score', 'Score')
+            const tier = pick(row, 'tierLabel', 'TierLabel', 'tier', 'Tier', 'conviction', 'Conviction') || 'Candidate'
+            const price = pick(row, 'price', 'Price')
+            const changePct = pick(row, 'changePct', 'ChangePct')
+            const buyLow = pick(row, 'buyRangeLow', 'BuyRangeLow')
+            const buyHigh = pick(row, 'buyRangeHigh', 'BuyRangeHigh')
+            const stop = pick(row, 'stopLoss', 'StopLoss')
+            const target1 = pick(row, 'target1', 'Target1')
+            const target2 = pick(row, 'target2', 'Target2')
+            const option = pick(row, 'option', 'Option')
+            const reason = pick(row, 'reason', 'Reason')
+            const signals = pick(row, 'signals', 'Signals') || []
+            const patterns = pick(row, 'patterns', 'Patterns') || []
+            return (
+              <tr key={`${symbol}-${index}`}>
+                <td className="strong">{symbol}</td>
+                {mode !== 'movers' && <td>{formatNumber(score, 1)}</td>}
+                {mode !== 'movers' && <td>{tier}</td>}
+                {mode === 'movers' && <td>{formatPrice(price)}</td>}
+                {mode === 'movers' && <td className={pnlClass(changePct)}>{formatPercent(changePct)}</td>}
+                {mode !== 'movers' && <td>{formatPrice(buyLow)} - {formatPrice(buyHigh)}</td>}
+                {mode !== 'movers' && <td>{formatPrice(stop)}</td>}
+                {mode !== 'movers' && <td>{formatPrice(target1)} / {formatPrice(target2)}</td>}
+                {mode === 'candidates' && <td>{option ? <span className="option-idea">{option}</span> : <span className="muted-text">No liquid contract</span>}</td>}
+                {mode === 'rejected' && <td>{reason || 'Filtered'}</td>}
+                {mode !== 'rejected' && mode !== 'movers' && <td>{[...signals, ...patterns].slice(0, 3).join(', ') || 'Setup'}</td>}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
