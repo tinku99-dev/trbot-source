@@ -114,6 +114,17 @@ LIMIT_ENTRY_MISS_BREAKOUT_PCT = float(os.environ.get("LIMIT_ENTRY_MISS_BREAKOUT_
 LIMIT_ENTRY_MISS_BREAKOUT_ATR_MULTIPLIER = float(os.environ.get("LIMIT_ENTRY_MISS_BREAKOUT_ATR_MULTIPLIER", "0.75"))
 LIMIT_ENTRY_MISS_BREAKOUT_MAX_PCT = float(os.environ.get("LIMIT_ENTRY_MISS_BREAKOUT_MAX_PCT", "4.0"))
 
+# Exceptional pre-retest starter: paper mode only. A small position may be
+# opened before the normal retest when independent confirmation is unusually
+# strong; the remainder is added only after the retest actually holds.
+STARTER_ENTRY_ENABLED = os.environ.get("STARTER_ENTRY_ENABLED", "true").lower() == "true"
+STARTER_ENTRY_MIN_SCORE = float(os.environ.get("STARTER_ENTRY_MIN_SCORE", "90"))
+STARTER_ENTRY_MIN_CONSENSUS = int(os.environ.get("STARTER_ENTRY_MIN_CONSENSUS", "3"))
+STARTER_ENTRY_SIZE_PCT = float(os.environ.get("STARTER_ENTRY_SIZE_PCT", "30"))
+STARTER_ENTRY_MAX_DISTRIBUTION_SCORE = float(os.environ.get("STARTER_ENTRY_MAX_DISTRIBUTION_SCORE", "35"))
+STARTER_ENTRY_MAX_OVEREXTENSION_PCT = float(os.environ.get("STARTER_ENTRY_MAX_OVEREXTENSION_PCT", "1.0"))
+MIN_NEW_ORDER_USD = float(os.environ.get("MIN_NEW_ORDER_USD", "10"))
+
 # Bollinger mean-reversion entries. The bot only opens long positions, so lower
 # band snapback setups are buyable; upper band extensions are recorded as a
 # bearish/unsupported reversal signal and are not used for long entries.
@@ -2570,6 +2581,122 @@ def _budget_is_full(active_positions: dict, pending_entries: dict | None = None,
     return (reserved + size) > TOTAL_CAPITAL_USD
 
 
+def _available_entry_cash(active_positions: dict, pending_entries: dict | None = None) -> float:
+    """Returns unreserved portfolio cash available for a new order."""
+    pending_entries = pending_entries or {}
+    reserved = _capital_deployed(active_positions) + _pending_capital_reserved(pending_entries)
+    return round(max(0.0, TOTAL_CAPITAL_USD - reserved), 2)
+
+
+def _starter_entry_structure(product_data: dict, signal: dict, rejected_structure: dict) -> dict:
+    """Returns a safe pre-retest structure for an exceptional paper starter."""
+    if not STARTER_ENTRY_ENABLED or LIVE_ORDERS_ACTIVE or rejected_structure.get("ok"):
+        return {}
+    if signal.get("strategy") not in {"CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT"}:
+        return {}
+    if "retested and held" not in str(rejected_structure.get("reason", "")):
+        return {}
+    if float(signal.get("score", 0.0) or 0.0) < STARTER_ENTRY_MIN_SCORE:
+        return {}
+    if int(signal.get("consensus_count", 0) or 0) < STARTER_ENTRY_MIN_CONSENSUS:
+        return {}
+
+    distribution = product_data.get("distribution_shadow", {}) or {}
+    if distribution.get("would_block") or float(distribution.get("score", 0.0) or 0.0) > STARTER_ENTRY_MAX_DISTRIBUTION_SCORE:
+        return {}
+    features = signal.get("features", {}) or {}
+    price = float(product_data.get("price", 0.0) or 0.0)
+    support_level = float(features.get("support_level", 0.0) or 0.0)
+    support_floor = float(features.get("support_floor", 0.0) or 0.0)
+    structural_stop = float(features.get("structural_stop", 0.0) or 0.0)
+    if structural_stop <= 0 and support_floor > 0:
+        structural_stop = support_floor * (1 - RETEST_STOP_BUFFER_PCT / 100.0)
+    stop_distance = ((price - structural_stop) / price * 100.0) if price > 0 and 0 < structural_stop < price else 999.0
+    overextension = float(features.get("overextension_pct", 0.0) or 0.0)
+    if support_level <= 0 or support_floor <= 0 or stop_distance > MAX_STRUCTURAL_STOP_PCT:
+        return {}
+    if overextension > STARTER_ENTRY_MAX_OVEREXTENSION_PCT:
+        return {}
+    return {
+        "ok": True,
+        "starter_entry": True,
+        "reason": "exceptional pre-retest starter",
+        "features": features,
+        "support_level": support_level,
+        "support_floor": support_floor,
+        "buy_zone_low": float(features.get("buy_zone_low", 0.0) or 0.0),
+        "buy_zone_high": float(features.get("buy_zone_high", 0.0) or 0.0),
+        "stop_loss": structural_stop,
+        "stop_distance_pct": stop_distance,
+    }
+
+
+def _maybe_scale_in_starter(product_data: dict, active_positions: dict,
+                            pending_entries: dict, market_context: dict) -> bool:
+    """Adds the remainder of a paper starter only after its retest passes."""
+    product_id = str(product_data.get("product_id") or "")
+    pos = active_positions.get(product_id) or {}
+    if not pos.get("starter_entry") or pos.get("starter_scaled_in") or pos.get("mode") != "paper":
+        return False
+    signal = select_entry_signal(product_data)
+    structure = structure_filter_result(product_data, signal)
+    if not signal.get("eligible") or not structure.get("ok"):
+        return False
+    if not liquidity_filter_result(product_data).get("ok") or not obv_filter_result(product_data).get("ok"):
+        return False
+    distribution = product_data.get("distribution_shadow", {}) or {}
+    if distribution.get("would_block"):
+        print(f"  [STARTER HOLD] {product_id}: retest passed but distribution shadow vetoed scale-in.")
+        return False
+    if MARKET_REGIME_FILTER and product_id != "BTC-USD":
+        relative_strength = float(product_data.get("price_change_1h", 0.0) or 0.0) - float(market_context.get("btc_1h_change", 0.0) or 0.0)
+        if relative_strength < MIN_REL_STRENGTH_VS_BTC:
+            return False
+    if MULTI_TIMEFRAME_CONFIRM and signal.get("requires_mtf"):
+        mtf = detect_multi_timeframe_signal(product_id)
+        if not mtf.get("confirmed"):
+            return False
+
+    planned_full = float(pos.get("starter_planned_full_size_usd", 0.0) or 0.0)
+    current_allocated = float(pos.get("allocated_usd", 0.0) or 0.0)
+    add_size = min(max(0.0, planned_full - current_allocated), _available_entry_cash(active_positions, pending_entries))
+    if add_size < MIN_NEW_ORDER_USD:
+        return False
+    price = float(product_data.get("price", 0.0) or 0.0)
+    if price <= 0:
+        return False
+    fee = add_size * PAPER_FEE_RATE_PCT / 100.0
+    add_qty = (add_size - fee) / price
+    old_qty = float(pos.get("simulated_qty", 0.0) or 0.0)
+    total_qty = old_qty + add_qty
+    old_entry = float(pos.get("entry_price", price) or price)
+    weighted_entry = ((old_entry * old_qty) + (price * add_qty)) / total_qty if total_qty > 0 else price
+
+    pos["simulated_qty"] = total_qty
+    pos["original_simulated_qty"] = total_qty
+    pos["allocated_usd"] = current_allocated + add_size
+    pos["original_allocated_usd"] = float(pos.get("original_allocated_usd", current_allocated) or current_allocated) + add_size
+    pos["paper_entry_fee_usd"] = float(pos.get("paper_entry_fee_usd", 0.0) or 0.0) + fee
+    pos["entry_price"] = weighted_entry
+    pos["highest_tracked_price"] = max(float(pos.get("highest_tracked_price", price) or price), price)
+    pos["current_trailing_stop"] = max(float(pos.get("current_trailing_stop", 0.0) or 0.0), float(structure.get("stop_loss", 0.0) or 0.0))
+    pos["quick_take_profit_boundary"] = weighted_entry * (1 + QUICK_TAKE_PROFIT_PERCENT / 100.0)
+    main_tp_pct = float(pos.get("main_take_profit_percent", NORMAL_TAKE_PROFIT_PERCENT) or NORMAL_TAKE_PROFIT_PERCENT)
+    pos["take_profit_boundary"] = weighted_entry * (1 + main_tp_pct / 100.0)
+    pos["starter_scaled_in"] = True
+    pos["starter_scale_in_timestamp"] = _utcnow_iso()
+    pos["starter_scale_in_price"] = price
+    pos["starter_scale_in_usd"] = add_size
+    pos["scale_in_distribution_shadow"] = distribution
+    print(f"  [STARTER SCALE-IN] {product_id}: retest held; added ${add_size:,.2f} at ${price:,.6g}.")
+    send_discord_alert(
+        f"🟩 [PAPER SCALE-IN] {product_id} — retest held\n"
+        f"💵 Added: ${add_size:,.2f} at ${price:,.6g} | Total: ${pos['allocated_usd']:,.2f}\n"
+        f"🛡️ Stop: ${pos['current_trailing_stop']:,.6g} | Weighted entry: ${weighted_entry:,.6g}"
+    )
+    return True
+
+
 def _shadow_alert_key(product_id: str, strategy: str) -> str:
     return f"{product_id}|{strategy}"
 
@@ -2881,6 +3008,9 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "current_stop": round(current_stop, 6),
             "trail_pct": round(trail_pct, 1),
             "partial_taken": partial_taken,
+            "starter_entry": bool(pos.get("starter_entry", False)),
+            "starter_scaled_in": bool(pos.get("starter_scaled_in", False)),
+            "starter_planned_full_size_usd": round(float(pos.get("starter_planned_full_size_usd", 0.0) or 0.0), 2),
             "entry_score": round(float(pos.get("signal_score", 0.0) or 0.0), 1),
             "entry_timestamp": pos.get("entry_timestamp", ""),
             "mode": pos.get("mode", "paper"),
@@ -3266,7 +3396,10 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
         product_id = prod["product_id"]
         price      = prod["price"]
 
-        if product_id in active_positions or product_id in pending_entries:
+        if product_id in active_positions:
+            _maybe_scale_in_starter(prod, active_positions, pending_entries, market_context)
+            continue
+        if product_id in pending_entries:
             continue
 
         if price <= 0:
@@ -3293,10 +3426,6 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
 
         signal = select_entry_signal(prod)
         structure = structure_filter_result(prod, signal)
-        if not structure["ok"]:
-            print(f"  [STRUCTURE SKIP] {product_id}: {structure['reason']}")
-            continue
-
         distribution_shadow = prod.get("distribution_shadow", {}) or {}
         if signal.get("eligible") and distribution_shadow.get("would_block"):
             shadow_reason = "; ".join(distribution_shadow.get("reasons", [])) or "distribution score"
@@ -3304,6 +3433,14 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 f"  [DISTRIBUTION SHADOW] {product_id}: would block score "
                 f"{float(distribution_shadow.get('score', 0.0) or 0.0):.0f} — {shadow_reason}"
             )
+        starter_structure = _starter_entry_structure(prod, signal, structure)
+        starter_entry = bool(starter_structure)
+        if not structure["ok"]:
+            if not starter_entry:
+                print(f"  [STRUCTURE SKIP] {product_id}: {structure['reason']}")
+                continue
+            structure = starter_structure
+            print(f"  [STARTER OK] {product_id}: exceptional setup qualifies for a {STARTER_ENTRY_SIZE_PCT:.0f}% pre-retest starter.")
 
         if MARKET_REGIME_FILTER and product_id != "BTC-USD":
             coin_1h = float(prod.get("price_change_1h", 0.0) or 0.0)
@@ -3338,6 +3475,18 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
             sizing_reasons.extend(fragile_reasons)
             position_size, structure_reasons = _structure_risk_position_size(structure, price, position_size)
             sizing_reasons.extend(structure_reasons)
+            planned_full_size = position_size
+            if starter_entry:
+                starter_fraction = max(0.05, min(0.50, STARTER_ENTRY_SIZE_PCT / 100.0))
+                position_size = round(position_size * starter_fraction, 2)
+                sizing_reasons.append(f"pre-retest starter {starter_fraction * 100:.0f}%")
+
+            available_cash = _available_entry_cash(active_positions, pending_entries)
+            if position_size > available_cash:
+                position_size = round(available_cash, 2)
+                sizing_reasons.append(f"reduced to available cash ${available_cash:,.2f}")
+            if position_size < MIN_NEW_ORDER_USD:
+                continue
 
             if _budget_is_full(active_positions, pending_entries, next_size=position_size):
                 budget_skip_reason = (
@@ -3350,7 +3499,7 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                     break
                 continue
 
-            if (not LIVE_ORDERS_ACTIVE) and _limit_entry_allowed_for_signal(signal, structure):
+            if (not starter_entry) and (not LIVE_ORDERS_ACTIVE) and _limit_entry_allowed_for_signal(signal, structure):
                 limit_price = _limit_entry_price(signal, structure, price)
                 if limit_price <= 0:
                     limit_price = price
@@ -3434,6 +3583,13 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 sizing_reasons,
                 entry_mode="market",
             )
+            if starter_entry:
+                pos = active_positions[product_id]
+                pos["starter_entry"] = True
+                pos["starter_scaled_in"] = False
+                pos["starter_planned_full_size_usd"] = planned_full_size
+                pos["starter_initial_size_usd"] = position_size
+                pos["starter_entry_score"] = float(signal.get("score", 0.0) or 0.0)
 
             confirming_strategies = signal.get("confirming_strategies", [signal["strategy"]])
             confidence_label = signal.get("confidence_level", "SINGLE")

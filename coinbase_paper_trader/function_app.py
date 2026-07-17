@@ -1545,6 +1545,9 @@ def paper_trading_summary(req: func.HttpRequest) -> func.HttpResponse:
                 "strategy": position.get("entry_strategy", ""),
                 "strategyScore": float(position.get("entry_strategy_score", 0) or 0),
                 "partialTakeProfitTaken": bool(position.get("partial_take_profit_taken", False)),
+                "starterEntry": bool(position.get("starter_entry", False)),
+                "starterScaledIn": bool(position.get("starter_scaled_in", False)),
+                "starterPlannedFullSizeUsd": round(float(position.get("starter_planned_full_size_usd", 0.0) or 0.0), 2),
                 "unrealizedPnlUsd": round(pnl, 2),
                 "unrealizedPnlPct": round(pnl_pct, 2),
             })
