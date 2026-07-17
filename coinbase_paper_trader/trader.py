@@ -189,6 +189,24 @@ DISTRIBUTION_SHADOW_ENABLED = os.environ.get("DISTRIBUTION_SHADOW_ENABLED", "tru
 DISTRIBUTION_SHADOW_BLOCK_SCORE = float(os.environ.get("DISTRIBUTION_SHADOW_BLOCK_SCORE", "50"))
 DISTRIBUTION_OBV_BEARISH_PCT = float(os.environ.get("DISTRIBUTION_OBV_BEARISH_PCT", "-15"))
 DISTRIBUTION_DOWN_VOLUME_RATIO = float(os.environ.get("DISTRIBUTION_DOWN_VOLUME_RATIO", "0.58"))
+DISTRIBUTION_DYNAMIC_BASELINE_ENABLED = os.environ.get("DISTRIBUTION_DYNAMIC_BASELINE_ENABLED", "true").lower() == "true"
+DISTRIBUTION_BASELINE_DAYS = int(os.environ.get("DISTRIBUTION_BASELINE_DAYS", "7"))
+DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER = float(os.environ.get("DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER", "0.75"))
+
+# Bounded public order-book guard. We walk Coinbase's aggregated price/size
+# levels to estimate spread, depth and average buy execution cost.
+ORDER_BOOK_GUARD_ENABLED = os.environ.get("ORDER_BOOK_GUARD_ENABLED", "true").lower() == "true"
+MAX_ENTRY_EXECUTION_SLIPPAGE_PCT = float(os.environ.get("MAX_ENTRY_EXECUTION_SLIPPAGE_PCT", "0.20"))
+MAX_SCALE_IN_SLIPPAGE_PCT = float(os.environ.get("MAX_SCALE_IN_SLIPPAGE_PCT", "0.25"))
+ORDER_BOOK_LIMIT = int(os.environ.get("ORDER_BOOK_LIMIT", "50"))
+ORDER_BOOK_TIMEOUT_SECONDS = int(os.environ.get("ORDER_BOOK_TIMEOUT_SECONDS", "8"))
+
+# Scale-in volatility and post-loss correlation controls.
+MAX_SCALE_IN_ATR_MULTIPLIER = float(os.environ.get("MAX_SCALE_IN_ATR_MULTIPLIER", "1.50"))
+CORRELATED_COOLDOWN_ENABLED = os.environ.get("CORRELATED_COOLDOWN_ENABLED", "true").lower() == "true"
+CORRELATED_COOLDOWN_HOURS = float(os.environ.get("CORRELATED_COOLDOWN_HOURS", "3"))
+CORRELATED_COOLDOWN_MIN_CORRELATION = float(os.environ.get("CORRELATED_COOLDOWN_MIN_CORRELATION", "0.90"))
+CORRELATED_COOLDOWN_MIN_POINTS = int(os.environ.get("CORRELATED_COOLDOWN_MIN_POINTS", "6"))
 
 # Market-regime guard: most alt breakouts fail when BTC is rolling over. New
 # entries are allowed only when BTC is not in a short-term pullback, and each
@@ -335,6 +353,11 @@ EARLY_FAILURE_MAX_HOLD_MINUTES = int(os.environ.get("EARLY_FAILURE_MAX_HOLD_MINU
 EARLY_FAILURE_MAX_PROFIT_PCT = float(os.environ.get("EARLY_FAILURE_MAX_PROFIT_PCT", "1.0"))
 EARLY_FAILURE_MIN_LOSS_PCT = float(os.environ.get("EARLY_FAILURE_MIN_LOSS_PCT", "-0.35"))
 FAILED_ENTRY_COOLDOWN_HOURS = float(os.environ.get("FAILED_ENTRY_COOLDOWN_HOURS", "8"))
+STAGNANT_EXIT_ENABLED = os.environ.get("STAGNANT_EXIT_ENABLED", "true").lower() == "true"
+STAGNANT_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("STAGNANT_EXIT_MIN_HOLD_MINUTES", "90"))
+STAGNANT_EXIT_MAX_ABS_PNL_PCT = float(os.environ.get("STAGNANT_EXIT_MAX_ABS_PNL_PCT", "0.35"))
+STAGNANT_EXIT_MAX_RANGE_PCT = float(os.environ.get("STAGNANT_EXIT_MAX_RANGE_PCT", "1.0"))
+STAGNANT_EXIT_MAX_VOLUME_RATIO = float(os.environ.get("STAGNANT_EXIT_MAX_VOLUME_RATIO", "0.75"))
 
 # Periodic Discord performance summary (total P/L, gain/loss, coins bought).
 SUMMARY_INTERVAL_HOURS = float(os.environ.get("SUMMARY_INTERVAL_HOURS", "6"))
@@ -1012,6 +1035,85 @@ def fetch_candles(product_id: str, granularity: int = CANDLE_GRANULARITY) -> lis
         return []
     data.sort(key=lambda c: c[0])  # API returns newest-first; make oldest-first
     return data
+
+
+def fetch_order_book_execution(product_id: str, quote_size_usd: float,
+                               side: str = "buy", max_cost_pct: float | None = None) -> dict:
+    """Estimates spread, depth and average execution from Coinbase level-2 data."""
+    default = {
+        "available": False, "ok": True, "spread_pct": 0.0,
+        "expected_price": 0.0, "execution_cost_pct": 0.0,
+        "recommended_quote_size": max(0.0, quote_size_usd), "reason": "book unavailable",
+    }
+    if not ORDER_BOOK_GUARD_ENABLED or quote_size_usd <= 0:
+        return default
+    cost_limit = max_cost_pct if max_cost_pct is not None else MAX_ENTRY_EXECUTION_SLIPPAGE_PCT
+    query = urllib.parse.urlencode({"product_id": product_id, "limit": max(10, min(200, ORDER_BOOK_LIMIT))})
+    url = f"https://api.coinbase.com/api/v3/brokerage/market/product_book?{query}"
+    request = urllib.request.Request(url, headers={"User-Agent": "coinbase-paper-trader/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=ORDER_BOOK_TIMEOUT_SECONDS) as response:  # nosec B310
+            payload = json.load(response)
+    except Exception as exc:
+        default["reason"] = f"book fetch failed: {exc}"
+        return default
+    book = payload.get("pricebook") or {}
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+    if not bids or not asks:
+        default["reason"] = "empty order book"
+        return default
+    try:
+        best_bid = float(bids[0].get("price", 0.0))
+        best_ask = float(asks[0].get("price", 0.0))
+    except (TypeError, ValueError, IndexError):
+        return default
+    midpoint = (best_bid + best_ask) / 2.0
+    if midpoint <= 0:
+        return default
+    spread_pct = (best_ask - best_bid) / midpoint * 100.0
+    levels = asks if side == "buy" else bids
+    filled_base = 0.0
+    filled_quote = 0.0
+    max_quote_within_limit = 0.0
+    target_quote = max(0.0, quote_size_usd)
+    for level in levels:
+        try:
+            level_price = float(level.get("price", 0.0))
+            level_base = float(level.get("size", 0.0))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if level_price <= 0 or level_base <= 0:
+            continue
+        remaining_quote = max(0.0, target_quote - filled_quote)
+        take_base = min(level_base, remaining_quote / level_price) if remaining_quote > 0 else 0.0
+        if take_base <= 0:
+            break
+        candidate_base = filled_base + take_base
+        candidate_quote = filled_quote + take_base * level_price
+        average_price = candidate_quote / candidate_base
+        execution_cost = ((average_price - midpoint) / midpoint * 100.0) if side == "buy" else ((midpoint - average_price) / midpoint * 100.0)
+        if execution_cost <= cost_limit:
+            filled_base = candidate_base
+            filled_quote = candidate_quote
+            max_quote_within_limit = filled_quote
+        else:
+            break
+        if filled_quote >= target_quote - 0.01:
+            break
+    expected_price = filled_quote / filled_base if filled_base > 0 else (best_ask if side == "buy" else best_bid)
+    execution_cost = ((expected_price - midpoint) / midpoint * 100.0) if side == "buy" else ((midpoint - expected_price) / midpoint * 100.0)
+    recommended = min(target_quote, max_quote_within_limit)
+    ok = recommended >= min(target_quote, MIN_NEW_ORDER_USD)
+    return {
+        "available": True,
+        "ok": ok,
+        "spread_pct": round(spread_pct, 4),
+        "expected_price": expected_price,
+        "execution_cost_pct": round(execution_cost, 4),
+        "recommended_quote_size": round(recommended, 2),
+        "reason": "order book depth OK" if ok else f"insufficient depth within {cost_limit:.2f}% execution cost",
+    }
 
 
 def recent_dollar_volume(candles: list[list], window: int = RECENT_LIQUIDITY_WINDOW_CANDLES) -> float:
@@ -1904,23 +2006,30 @@ def analyze_distribution_phase(candles: list[list]) -> dict:
     score = 0.0
     reasons: list[str] = []
 
+    components: dict[str, float] = {}
     if price_4h > 0.75 and pressure_4h < 0:
         score += 30
+        components["divergence"] = 30
         reasons.append(f"4h price/OBV bearish divergence ({price_4h:+.2f}%/{pressure_4h:+.1f}%)")
     if pressure_4h <= DISTRIBUTION_OBV_BEARISH_PCT:
         score += 25
+        components["obv_4h"] = 25
         reasons.append(f"4h OBV pressure {pressure_4h:+.1f}%")
     if pressure_24h <= DISTRIBUTION_OBV_BEARISH_PCT:
         score += 15
+        components["obv_long"] = 15
         reasons.append(f"long OBV pressure {pressure_24h:+.1f}%")
     if down_volume_ratio >= DISTRIBUTION_DOWN_VOLUME_RATIO:
         score += 20
+        components["down_volume"] = 20
         reasons.append(f"4h down-volume ratio {down_volume_ratio:.2f}")
     if high_volume_red >= 2:
         score += 15
+        components["red_volume"] = 15
         reasons.append(f"{high_volume_red} high-volume red candles")
     if upper_wick_rejections >= 3:
         score += 10
+        components["upper_wicks"] = 10
         reasons.append(f"{upper_wick_rejections} upper-wick rejections")
 
     score = min(100.0, score)
@@ -1948,7 +2057,82 @@ def analyze_distribution_phase(candles: list[list]) -> dict:
         "down_volume_ratio_4h": round(down_volume_ratio, 3),
         "high_volume_red_candles_4h": high_volume_red,
         "upper_wick_rejections_4h": upper_wick_rejections,
+        "score_components": components,
     }
+
+
+def apply_dynamic_distribution_baseline(analysis: dict, hourly_candles: list[list]) -> dict:
+    """Adapts flow/wick thresholds to the coin's recent seven-day hourly regime."""
+    if not DISTRIBUTION_DYNAMIC_BASELINE_ENABLED or len(hourly_candles) < 72:
+        return analysis
+    days = max(3, min(DISTRIBUTION_BASELINE_DAYS, len(hourly_candles) // 24))
+    sample = hourly_candles[-days * 24:]
+    down_ratios: list[float] = []
+    wick_rates: list[float] = []
+    for start in range(0, len(sample), 24):
+        window = sample[start:start + 24]
+        total_volume = sum(float(c[5] or 0.0) for c in window)
+        down_volume = sum(float(c[5] or 0.0) for c in window if float(c[4] or 0.0) < float(c[3] or 0.0))
+        wick_count = 0
+        for candle in window:
+            low, high = float(candle[1] or 0.0), float(candle[2] or 0.0)
+            opened, close = float(candle[3] or 0.0), float(candle[4] or 0.0)
+            candle_range = high - low
+            if candle_range > 0 and (high - max(opened, close)) / candle_range >= 0.55 and close <= opened:
+                wick_count += 1
+        down_ratios.append(down_volume / total_volume if total_volume else 0.0)
+        wick_rates.append(wick_count / max(1, len(window)))
+
+    def mean_std(values: list[float]) -> tuple[float, float]:
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / len(values)
+        return mean, variance ** 0.5
+
+    down_mean, down_std = mean_std(down_ratios)
+    wick_mean, wick_std = mean_std(wick_rates)
+    multiplier = max(0.0, DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER)
+    dynamic_down_threshold = max(0.52, min(0.75, down_mean + multiplier * down_std))
+    dynamic_wick_rate = max(0.06, min(0.30, wick_mean + multiplier * wick_std))
+    dynamic_wick_count = max(2, int(dynamic_wick_rate * 48 + 0.999))
+
+    updated = dict(analysis)
+    components = dict(updated.get("score_components") or {})
+    reasons = [
+        reason for reason in list(updated.get("reasons") or [])
+        if not reason.startswith("4h down-volume ratio") and "upper-wick rejections" not in reason
+    ]
+    components.pop("down_volume", None)
+    components.pop("upper_wicks", None)
+    down_ratio = float(updated.get("down_volume_ratio_4h", 0.0) or 0.0)
+    wick_count = int(updated.get("upper_wick_rejections_4h", 0) or 0)
+    if down_ratio >= dynamic_down_threshold:
+        components["down_volume"] = 20
+        reasons.append(f"4h down-volume ratio {down_ratio:.2f} >= dynamic {dynamic_down_threshold:.2f}")
+    if wick_count >= dynamic_wick_count:
+        components["upper_wicks"] = 10
+        reasons.append(f"{wick_count} upper-wick rejections >= dynamic {dynamic_wick_count}")
+    score = min(100.0, sum(components.values()))
+    price_4h = float(updated.get("price_change_4h", 0.0) or 0.0)
+    obv_4h = float(updated.get("obv_pressure_4h", 0.0) or 0.0)
+    if score >= DISTRIBUTION_SHADOW_BLOCK_SCORE:
+        phase = "DISTRIBUTION"
+    elif price_4h > 0 and obv_4h > 0:
+        phase = "MARKUP"
+    elif price_4h <= 0 and obv_4h < 0:
+        phase = "MARKDOWN"
+    else:
+        phase = "NEUTRAL"
+    updated.update({
+        "score": round(score, 1),
+        "would_block": score >= DISTRIBUTION_SHADOW_BLOCK_SCORE,
+        "phase": phase,
+        "reasons": reasons,
+        "score_components": components,
+        "dynamic_baseline_days": days,
+        "dynamic_down_volume_threshold": round(dynamic_down_threshold, 3),
+        "dynamic_upper_wick_threshold_4h": dynamic_wick_count,
+    })
+    return updated
 
 
 def get_btc_market_context() -> dict:
@@ -2558,6 +2742,58 @@ def _failed_entry_cooldown_remaining(history: list, product_id: str) -> int:
     return max(0, cooldown - (now - latest_loss)) if latest_loss else 0
 
 
+def _return_series(candles: list[list]) -> dict[int, float]:
+    returns: dict[int, float] = {}
+    for index in range(1, len(candles)):
+        previous = float(candles[index - 1][4] or 0.0)
+        current = float(candles[index][4] or 0.0)
+        if previous > 0:
+            returns[int(candles[index][0])] = (current - previous) / previous
+    return returns
+
+
+def _pearson_correlation(left: dict[int, float], right: dict[int, float]) -> tuple[float, int]:
+    timestamps = sorted(set(left).intersection(right))
+    if len(timestamps) < CORRELATED_COOLDOWN_MIN_POINTS:
+        return 0.0, len(timestamps)
+    xs = [left[timestamp] for timestamp in timestamps]
+    ys = [right[timestamp] for timestamp in timestamps]
+    x_mean, y_mean = sum(xs) / len(xs), sum(ys) / len(ys)
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    x_var = sum((x - x_mean) ** 2 for x in xs)
+    y_var = sum((y - y_mean) ** 2 for y in ys)
+    denominator = (x_var * y_var) ** 0.5
+    return ((numerator / denominator) if denominator > 0 else 0.0), len(timestamps)
+
+
+def _correlated_loss_cooldown(history: list, product_id: str,
+                              candle_cache: dict[str, list[list]]) -> tuple[bool, str]:
+    """Blocks brief re-risking into a coin highly correlated with a recent loser."""
+    if not CORRELATED_COOLDOWN_ENABLED:
+        return False, ""
+    cutoff = _utcnow_epoch() - int(max(0.0, CORRELATED_COOLDOWN_HOURS) * 3600)
+    recent_losers: dict[str, int] = {}
+    for trade in history:
+        if not isinstance(trade, dict) or trade.get("product_id") == product_id:
+            continue
+        perf = trade.get("performance") or {}
+        exit_timestamp = _iso_to_epoch(str((trade.get("exit") or {}).get("timestamp", "")))
+        if perf.get("status") == "CLOSED" and float(perf.get("pnl_usd", 0.0) or 0.0) < 0 and exit_timestamp >= cutoff:
+            recent_losers[str(trade.get("product_id") or "")] = exit_timestamp
+    if not recent_losers:
+        return False, ""
+    if product_id not in candle_cache:
+        candle_cache[product_id] = fetch_candles(product_id, MTF_GRAN_1H)
+    candidate_returns = _return_series(candle_cache.get(product_id, []))
+    for loser in sorted(recent_losers, key=recent_losers.get, reverse=True):
+        if loser not in candle_cache:
+            candle_cache[loser] = fetch_candles(loser, MTF_GRAN_1H)
+        correlation, points = _pearson_correlation(candidate_returns, _return_series(candle_cache.get(loser, [])))
+        if points >= CORRELATED_COOLDOWN_MIN_POINTS and correlation >= CORRELATED_COOLDOWN_MIN_CORRELATION:
+            return True, f"{correlation:.2f} correlation with recent loser {loser} ({points} hourly returns)"
+    return False, ""
+
+
 def _capital_deployed(active_positions: dict) -> float:
     """Returns total USD currently locked in open positions (uses actual allocated_usd)."""
     return sum(float(p.get("allocated_usd") or CAPITAL_PER_TRADE_USD)
@@ -2636,7 +2872,8 @@ def _maybe_scale_in_starter(product_data: dict, active_positions: dict,
     """Adds the remainder of a paper starter only after its retest passes."""
     product_id = str(product_data.get("product_id") or "")
     pos = active_positions.get(product_id) or {}
-    if not pos.get("starter_entry") or pos.get("starter_scaled_in") or pos.get("mode") != "paper":
+    if (not pos.get("starter_entry") or pos.get("starter_scaled_in")
+            or pos.get("starter_scale_in_aborted") or pos.get("mode") != "paper"):
         return False
     signal = select_entry_signal(product_data)
     structure = structure_filter_result(product_data, signal)
@@ -2645,6 +2882,11 @@ def _maybe_scale_in_starter(product_data: dict, active_positions: dict,
     if not liquidity_filter_result(product_data).get("ok") or not obv_filter_result(product_data).get("ok"):
         return False
     distribution = product_data.get("distribution_shadow", {}) or {}
+    if DISTRIBUTION_DYNAMIC_BASELINE_ENABLED:
+        distribution = apply_dynamic_distribution_baseline(
+            distribution, fetch_candles(product_id, MTF_GRAN_1H)
+        )
+        product_data["distribution_shadow"] = distribution
     if distribution.get("would_block"):
         print(f"  [STARTER HOLD] {product_id}: retest passed but distribution shadow vetoed scale-in.")
         return False
@@ -2665,12 +2907,40 @@ def _maybe_scale_in_starter(product_data: dict, active_positions: dict,
     price = float(product_data.get("price", 0.0) or 0.0)
     if price <= 0:
         return False
+    entry_atr = float(pos.get("starter_entry_atr_pct", 0.0) or 0.0)
+    current_atr = calculate_atr_pct(product_id)
+    if entry_atr > 0 and current_atr > entry_atr * MAX_SCALE_IN_ATR_MULTIPLIER:
+        pos["starter_scale_in_aborted"] = True
+        pos["starter_scale_in_abort_reason"] = f"ATR spike {current_atr:.2f}% vs entry {entry_atr:.2f}%"
+        print(f"  [STARTER ABORT] {product_id}: {pos['starter_scale_in_abort_reason']}.")
+        return False
+    execution = fetch_order_book_execution(product_id, add_size, "buy", MAX_SCALE_IN_SLIPPAGE_PCT)
+    if execution.get("available") and (
+        not execution.get("ok")
+        or float(execution.get("recommended_quote_size", 0.0) or 0.0) + 0.01 < add_size
+        or float(execution.get("execution_cost_pct", 0.0) or 0.0) > MAX_SCALE_IN_SLIPPAGE_PCT
+    ):
+        pos["starter_scale_in_aborted"] = True
+        pos["starter_scale_in_abort_reason"] = str(execution.get("reason") or "scale-in slippage cap")
+        print(f"  [STARTER ABORT] {product_id}: {pos['starter_scale_in_abort_reason']}.")
+        return False
+    execution_price = float(execution.get("expected_price", 0.0) or 0.0) if execution.get("available") else price
+    if execution_price <= 0:
+        execution_price = price
+
+    stop = float(structure.get("stop_loss", 0.0) or 0.0)
+    projected_entry = ((float(pos.get("entry_price", price) or price) * current_allocated) + (execution_price * add_size)) / (current_allocated + add_size)
+    projected_stop_pct = ((projected_entry - stop) / projected_entry * 100.0) if 0 < stop < projected_entry else TRAILING_PERCENT
+    max_total_allocation = (TOTAL_CAPITAL_USD * RISK_PER_TRADE_PCT / 100.0) / (max(0.25, projected_stop_pct) / 100.0)
+    add_size = min(add_size, max(0.0, max_total_allocation - current_allocated))
+    if add_size < MIN_NEW_ORDER_USD:
+        return False
     fee = add_size * PAPER_FEE_RATE_PCT / 100.0
-    add_qty = (add_size - fee) / price
+    add_qty = (add_size - fee) / execution_price
     old_qty = float(pos.get("simulated_qty", 0.0) or 0.0)
     total_qty = old_qty + add_qty
     old_entry = float(pos.get("entry_price", price) or price)
-    weighted_entry = ((old_entry * old_qty) + (price * add_qty)) / total_qty if total_qty > 0 else price
+    weighted_entry = ((old_entry * old_qty) + (execution_price * add_qty)) / total_qty if total_qty > 0 else execution_price
 
     pos["simulated_qty"] = total_qty
     pos["original_simulated_qty"] = total_qty
@@ -2685,13 +2955,14 @@ def _maybe_scale_in_starter(product_data: dict, active_positions: dict,
     pos["take_profit_boundary"] = weighted_entry * (1 + main_tp_pct / 100.0)
     pos["starter_scaled_in"] = True
     pos["starter_scale_in_timestamp"] = _utcnow_iso()
-    pos["starter_scale_in_price"] = price
+    pos["starter_scale_in_price"] = execution_price
     pos["starter_scale_in_usd"] = add_size
+    pos["starter_scale_in_execution"] = execution
     pos["scale_in_distribution_shadow"] = distribution
-    print(f"  [STARTER SCALE-IN] {product_id}: retest held; added ${add_size:,.2f} at ${price:,.6g}.")
+    print(f"  [STARTER SCALE-IN] {product_id}: retest held; added ${add_size:,.2f} at ${execution_price:,.6g}.")
     send_discord_alert(
         f"🟩 [PAPER SCALE-IN] {product_id} — retest held\n"
-        f"💵 Added: ${add_size:,.2f} at ${price:,.6g} | Total: ${pos['allocated_usd']:,.2f}\n"
+        f"💵 Added: ${add_size:,.2f} at ${execution_price:,.6g} | Total: ${pos['allocated_usd']:,.2f}\n"
         f"🛡️ Stop: ${pos['current_trailing_stop']:,.6g} | Weighted entry: ${weighted_entry:,.6g}"
     )
     return True
@@ -2915,6 +3186,7 @@ def _open_position_from_entry(
         "entry_stop_distance_pct": float(structure.get("stop_distance_pct", 0.0) or 0.0),
         "entry_sizing_notes":     list(sizing_reasons),
         "entry_distribution_shadow": product_data.get("distribution_shadow", {}),
+        "entry_order_book_execution": product_data.get("order_book_execution", {}),
     }
     return {
         "crypto_qty": crypto_qty,
@@ -3384,6 +3656,7 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
 
     shadow_candidates = []
     budget_skip_reason = ""
+    hourly_candle_cache: dict[str, list[list]] = {}
 
     # Portfolio daily stop: if total loss today >= MAX_DAILY_LOSS_PCT, skip all entries.
     if is_portfolio_stopped_today(daily_ledger):
@@ -3425,6 +3698,11 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
             continue
 
         signal = select_entry_signal(prod)
+        if signal.get("eligible") and DISTRIBUTION_DYNAMIC_BASELINE_ENABLED:
+            hourly_candle_cache[product_id] = fetch_candles(product_id, MTF_GRAN_1H)
+            prod["distribution_shadow"] = apply_dynamic_distribution_baseline(
+                prod.get("distribution_shadow", {}) or {}, hourly_candle_cache[product_id]
+            )
         structure = structure_filter_result(prod, signal)
         distribution_shadow = prod.get("distribution_shadow", {}) or {}
         if signal.get("eligible") and distribution_shadow.get("would_block"):
@@ -3450,6 +3728,12 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 print(f"  [RS SKIP] {product_id}: 1h {coin_1h:+.2f}% vs BTC {btc_1h:+.2f}% (RS {rel_strength:+.2f}% < {MIN_REL_STRENGTH_VS_BTC:.2f}%)")
                 continue
         if signal["eligible"]:
+            correlated_block, correlated_reason = _correlated_loss_cooldown(
+                history, product_id, hourly_candle_cache
+            )
+            if correlated_block:
+                print(f"  [CORRELATION COOLDOWN] {product_id}: {correlated_reason}")
+                continue
             # Multi-timeframe confirmation: the 5m trigger must hold up on 15m/1h
             # and not contradict the 4h trend. Only runs for triggered coins, so
             # the extra candle calls are limited to a handful per cycle.
@@ -3480,6 +3764,25 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 starter_fraction = max(0.05, min(0.50, STARTER_ENTRY_SIZE_PCT / 100.0))
                 position_size = round(position_size * starter_fraction, 2)
                 sizing_reasons.append(f"pre-retest starter {starter_fraction * 100:.0f}%")
+
+            order_book = fetch_order_book_execution(product_id, position_size, "buy")
+            prod["order_book_execution"] = order_book
+            if order_book.get("available"):
+                book_size = float(order_book.get("recommended_quote_size", 0.0) or 0.0)
+                if not order_book.get("ok") or book_size < MIN_NEW_ORDER_USD:
+                    print(f"  [BOOK SKIP] {product_id}: {order_book.get('reason', 'insufficient depth')}")
+                    continue
+                if book_size + 0.01 < position_size:
+                    position_size = round(book_size, 2)
+                    sizing_reasons.append(
+                        f"book cap ${book_size:,.2f} at {float(order_book.get('execution_cost_pct', 0.0) or 0.0):.3f}% cost"
+                    )
+            entry_execution_price = (
+                float(order_book.get("expected_price", 0.0) or 0.0)
+                if order_book.get("available") else price
+            )
+            if entry_execution_price <= 0:
+                entry_execution_price = price
 
             available_cash = _available_entry_cash(active_positions, pending_entries)
             if position_size > available_cash:
@@ -3517,6 +3820,7 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                     "structure": structure,
                     "mtf_scores": mtf_scores,
                     "sizing_reasons": list(sizing_reasons),
+                    "order_book_execution": order_book,
                     "support_level": float(structure.get("support_level", 0.0) or 0.0),
                     "support_floor": float(structure.get("support_floor", 0.0) or 0.0),
                     "invalidation_floor": float(structure.get("support_floor", 0.0) or 0.0),
@@ -3578,7 +3882,7 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 signal,
                 structure,
                 position_size,
-                price,
+                entry_execution_price,
                 mtf_scores,
                 sizing_reasons,
                 entry_mode="market",
@@ -3590,6 +3894,8 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 pos["starter_planned_full_size_usd"] = planned_full_size
                 pos["starter_initial_size_usd"] = position_size
                 pos["starter_entry_score"] = float(signal.get("score", 0.0) or 0.0)
+                pos["starter_entry_atr_pct"] = calculate_atr_pct(product_id)
+                pos["starter_entry_execution"] = order_book
 
             confirming_strategies = signal.get("confirming_strategies", [signal["strategy"]])
             confidence_label = signal.get("confidence_level", "SINGLE")
@@ -3712,6 +4018,31 @@ def _early_failure_reason(pos: dict, current_price: float) -> str:
     return ""
 
 
+def _stagnant_position_reason(pos: dict, current_price: float, candles: list[list]) -> str:
+    """Cuts capital trapped in a tight range with materially declining volume."""
+    if not STAGNANT_EXIT_ENABLED or pos.get("quick_take_profit_taken") or pos.get("partial_take_profit_taken"):
+        return ""
+    held = _position_held_minutes(pos)
+    if held < STAGNANT_EXIT_MIN_HOLD_MINUTES or abs(_position_profit_pct(pos, current_price)) > STAGNANT_EXIT_MAX_ABS_PNL_PCT:
+        return ""
+    required = max(12, STAGNANT_EXIT_MIN_HOLD_MINUTES // 5)
+    if len(candles) < required:
+        return ""
+    window = candles[-required:]
+    highs = [float(c[2] or 0.0) for c in window]
+    lows = [float(c[1] or 0.0) for c in window]
+    reference = float(pos.get("entry_price", current_price) or current_price)
+    range_pct = ((max(highs) - min(lows)) / reference * 100.0) if reference > 0 else 999.0
+    split = max(6, len(window) // 3)
+    recent_volume = sum(float(c[5] or 0.0) for c in window[-split:]) / split
+    prior = window[:-split]
+    prior_volume = sum(float(c[5] or 0.0) for c in prior) / max(1, len(prior))
+    volume_ratio = recent_volume / prior_volume if prior_volume > 0 else 1.0
+    if range_pct <= STAGNANT_EXIT_MAX_RANGE_PCT and volume_ratio <= STAGNANT_EXIT_MAX_VOLUME_RATIO:
+        return f"STAGNANT_CAPITAL_{held}M_RANGE_{range_pct:.2f}PCT_VOLUME_{volume_ratio:.2f}X"
+    return ""
+
+
 def _entry_review_snapshot(pos: dict) -> dict:
     """Captures entry context so closed-trade review can explain why a trade failed."""
     features = pos.get("entry_strategy_features", {}) or {}
@@ -3737,6 +4068,7 @@ def _entry_review_snapshot(pos: dict) -> dict:
         "entry_wedge_score": float(pos.get("wedge_score", 0.0) or 0.0),
         "entry_momentum_runner_score": float(pos.get("momentum_runner_score", 0.0) or 0.0),
         "entry_distribution_shadow": pos.get("entry_distribution_shadow", {}),
+        "entry_order_book_execution": pos.get("entry_order_book_execution", {}),
     }
 
 
@@ -4091,6 +4423,11 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                 print(f"  {msg}")
                 send_discord_alert(msg)
                 continue
+        elif (stagnant_reason := _stagnant_position_reason(
+            pos, current_price, (position_candles := fetch_candles(product_id))
+        )):
+            exit_triggered = True
+            exit_reason = stagnant_reason
         elif (early_failure := _early_failure_reason(pos, current_price)):
             exit_triggered = True
             exit_reason = early_failure
@@ -4099,7 +4436,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
             exit_reason    = "TRAILING_STOP_LOSS_TRIGGERED"
         else:
             # Bearish-reversal exit: leave before the trailing stop if the trend flips.
-            reversal = detect_bearish_reversal(product_id)
+            reversal = detect_bearish_reversal(product_id, position_candles)
             if reversal["bearish"]:
                 should_exit, decision_reason = _should_exit_on_bearish_reversal(pos, current_price, reversal)
                 if should_exit:
@@ -4835,6 +5172,15 @@ def run_scan_snapshot() -> dict:
             prod["wedge_score"] = wedge["wedge_score"]
         except Exception:
             prod.setdefault("wedge_score", 0.0)
+
+    if DISTRIBUTION_DYNAMIC_BASELINE_ENABLED:
+        for prod in products:
+            if not select_entry_signal(prod).get("eligible"):
+                continue
+            hourly = fetch_candles(str(prod.get("product_id") or ""), MTF_GRAN_1H)
+            prod["distribution_shadow"] = apply_dynamic_distribution_baseline(
+                prod.get("distribution_shadow", {}) or {}, hourly
+            )
 
     snapshot = build_scan_snapshot(products, active_positions)
     save_json_file(SCAN_SNAPSHOT_FILE, snapshot)
