@@ -49,6 +49,8 @@ MAX_DAILY_LOSS_PCT      = float(os.environ.get("MAX_DAILY_LOSS_PCT",        "5.0
 DYNAMIC_SIZING_ENABLED  = os.environ.get("DYNAMIC_SIZING_ENABLED", "true").lower() == "true"
 DYNAMIC_SIZE_MIN_PCT    = float(os.environ.get("DYNAMIC_SIZE_MIN_PCT",  "50"))   # % at lowest allowed score
 DYNAMIC_SIZE_MAX_PCT    = float(os.environ.get("DYNAMIC_SIZE_MAX_PCT", "150"))   # % at score 100
+MAX_SINGLE_POSITION_PCT = float(os.environ.get("MAX_SINGLE_POSITION_PCT", "35"))
+RISK_PER_TRADE_PCT      = float(os.environ.get("RISK_PER_TRADE_PCT", "1.0"))
 FRAGILE_SIZE_CAP_ENABLED = os.environ.get("FRAGILE_SIZE_CAP_ENABLED", "true").lower() == "true"
 FRAGILE_LOW_PRICE_THRESHOLD_USD = float(os.environ.get("FRAGILE_LOW_PRICE_THRESHOLD_USD", "0.001"))
 FRAGILE_LOW_VOLUME_THRESHOLD_USD = float(os.environ.get("FRAGILE_LOW_VOLUME_THRESHOLD_USD", "1000000"))
@@ -245,7 +247,8 @@ MOON_BAG_PERCENT      = max(0.0, min(100.0, float(os.environ.get("MOON_BAG_PERCE
 TAKE_PROFIT_SELL_PERCENT = 100.0 - MOON_BAG_PERCENT
 QUICK_TAKE_PROFIT_ENABLED = os.environ.get("QUICK_TAKE_PROFIT_ENABLED", "true").lower() == "true"
 QUICK_TAKE_PROFIT_PERCENT = float(os.environ.get("QUICK_TAKE_PROFIT_PERCENT", "4.0"))
-QUICK_TAKE_PROFIT_SELL_PERCENT = max(0.0, min(100.0, float(os.environ.get("QUICK_TAKE_PROFIT_SELL_PERCENT", "25"))))
+QUICK_TAKE_PROFIT_SELL_PERCENT = max(0.0, min(100.0, float(os.environ.get("QUICK_TAKE_PROFIT_SELL_PERCENT", "30"))))
+PAPER_FEE_RATE_PCT      = max(0.0, float(os.environ.get("PAPER_FEE_RATE_PCT", "0.15")))
 LOOP_INTERVAL_SECONDS = 300     # 5-minute loop
 
 # Dynamic trailing stop. A flat 5% trail shakes you out of big runners on the
@@ -307,6 +310,12 @@ BEARISH_EXIT_SEVERE_MIN_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_SEVERE_M
 BEARISH_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("BEARISH_EXIT_MIN_HOLD_MINUTES", "150"))
 BEARISH_EXIT_STALL_PROFIT_PCT = float(os.environ.get("BEARISH_EXIT_STALL_PROFIT_PCT", "0.75"))
 POST_TP_BEARISH_EXIT_MIN_GAIN_PCT = float(os.environ.get("POST_TP_BEARISH_EXIT_MIN_GAIN_PCT", "6.0"))
+EARLY_FAILURE_EXIT_ENABLED = os.environ.get("EARLY_FAILURE_EXIT_ENABLED", "true").lower() == "true"
+EARLY_FAILURE_MIN_HOLD_MINUTES = int(os.environ.get("EARLY_FAILURE_MIN_HOLD_MINUTES", "45"))
+EARLY_FAILURE_MAX_HOLD_MINUTES = int(os.environ.get("EARLY_FAILURE_MAX_HOLD_MINUTES", "120"))
+EARLY_FAILURE_MAX_PROFIT_PCT = float(os.environ.get("EARLY_FAILURE_MAX_PROFIT_PCT", "1.0"))
+EARLY_FAILURE_MIN_LOSS_PCT = float(os.environ.get("EARLY_FAILURE_MIN_LOSS_PCT", "-0.35"))
+FAILED_ENTRY_COOLDOWN_HOURS = float(os.environ.get("FAILED_ENTRY_COOLDOWN_HOURS", "8"))
 
 # Periodic Discord performance summary (total P/L, gain/loss, coins bought).
 SUMMARY_INTERVAL_HOURS = float(os.environ.get("SUMMARY_INTERVAL_HOURS", "6"))
@@ -2394,6 +2403,43 @@ def _risk_adjusted_position_size(product_data: dict, signal: dict, base_size: fl
     return capped_size, reasons
 
 
+def _structure_risk_position_size(structure: dict, market_price: float,
+                                  base_size: float) -> tuple[float, list[str]]:
+    """Caps confidence sizing by portfolio concentration and dollars at risk."""
+    reasons: list[str] = []
+    concentration_cap = TOTAL_CAPITAL_USD * max(5.0, min(100.0, MAX_SINGLE_POSITION_PCT)) / 100.0
+    sized = min(base_size, concentration_cap)
+    if sized < base_size:
+        reasons.append(f"portfolio cap {MAX_SINGLE_POSITION_PCT:.0f}%")
+
+    stop = float(structure.get("stop_loss", 0.0) or 0.0)
+    stop_pct = ((market_price - stop) / market_price * 100.0) if market_price > 0 and 0 < stop < market_price else TRAILING_PERCENT
+    stop_pct = max(0.25, stop_pct)
+    risk_budget = TOTAL_CAPITAL_USD * max(0.1, RISK_PER_TRADE_PCT) / 100.0
+    risk_cap = risk_budget / (stop_pct / 100.0)
+    if risk_cap < sized:
+        sized = risk_cap
+        reasons.append(f"risk cap {RISK_PER_TRADE_PCT:.2f}% at {stop_pct:.2f}% stop")
+    return round(max(0.0, sized), 2), reasons
+
+
+def _failed_entry_cooldown_remaining(history: list, product_id: str) -> int:
+    """Returns cooldown seconds after the most recent losing full exit."""
+    cooldown = int(max(0.0, FAILED_ENTRY_COOLDOWN_HOURS) * 3600)
+    if cooldown <= 0:
+        return 0
+    now = _utcnow_epoch()
+    latest_loss = 0
+    for trade in history:
+        if not isinstance(trade, dict) or trade.get("product_id") != product_id:
+            continue
+        perf = trade.get("performance") or {}
+        if perf.get("status") != "CLOSED" or float(perf.get("pnl_usd", 0.0) or 0.0) >= 0:
+            continue
+        latest_loss = max(latest_loss, _iso_to_epoch(str((trade.get("exit") or {}).get("timestamp", ""))))
+    return max(0, cooldown - (now - latest_loss)) if latest_loss else 0
+
+
 def _capital_deployed(active_positions: dict) -> float:
     """Returns total USD currently locked in open positions (uses actual allocated_usd)."""
     return sum(float(p.get("allocated_usd") or CAPITAL_PER_TRADE_USD)
@@ -2546,7 +2592,8 @@ def _open_position_from_entry(
     limit_price: float = 0.0,
 ) -> dict:
     product_id = product_data["product_id"]
-    crypto_qty = position_size / fill_price if fill_price > 0 else 0.0
+    entry_fee = 0.0 if LIVE_ORDERS_ACTIVE else position_size * PAPER_FEE_RATE_PCT / 100.0
+    crypto_qty = (position_size - entry_fee) / fill_price if fill_price > 0 else 0.0
     _sig_feats = signal.get("features", {}) or {}
     _fvg_candle_open = float(_sig_feats.get("trigger_candle_open", 0.0) or 0.0)
     if structure.get("ok") and float(structure.get("stop_loss", 0.0) or 0.0) > 0:
@@ -2578,6 +2625,8 @@ def _open_position_from_entry(
         "original_allocated_usd": position_size,
         "simulated_qty":          crypto_qty,
         "original_simulated_qty": crypto_qty,
+        "paper_entry_fee_usd":   entry_fee,
+        "paper_fee_rate_pct":    0.0 if LIVE_ORDERS_ACTIVE else PAPER_FEE_RATE_PCT,
         "position_size_pct":      size_pct,
         "highest_tracked_price":  fill_price,
         "current_trailing_stop":  initial_stop,
@@ -2999,6 +3048,10 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
     Products are already sorted by 24h volume; we re-sort by score for entry priority.
     Coins that breached their daily loss cap are skipped until the next UTC day.
     """
+    history = load_json_file(HISTORY_FILE)
+    if not isinstance(history, list):
+        history = []
+
     # Enrich each product with breakout pattern features and score.
     # Public snapshot already computed these; only fill in when missing.
     # Primary: candle-based detector. Fallback: rolling-snapshot detector.
@@ -3096,6 +3149,11 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
         if is_coin_blocked_today(daily_ledger, product_id):
             continue
 
+        cooldown_remaining = _failed_entry_cooldown_remaining(history, product_id)
+        if cooldown_remaining > 0:
+            print(f"  [COOLDOWN] {product_id}: losing exit; retry blocked for {cooldown_remaining / 3600:.1f}h")
+            continue
+
         liquidity = liquidity_filter_result(prod)
         if not liquidity["ok"]:
             print(f"  [LIQ SKIP] {product_id}: {liquidity['reason']}")
@@ -3143,6 +3201,8 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 sizing_reasons.append(f"runner cap {MOMENTUM_RUNNER_MAX_POSITION_PCT:.0f}%")
             position_size, fragile_reasons = _risk_adjusted_position_size(prod, signal, position_size)
             sizing_reasons.extend(fragile_reasons)
+            position_size, structure_reasons = _structure_risk_position_size(structure, price, position_size)
+            sizing_reasons.extend(structure_reasons)
 
             if _budget_is_full(active_positions, pending_entries, next_size=position_size):
                 budget_skip_reason = (
@@ -3335,6 +3395,30 @@ def _position_held_minutes(pos: dict) -> int:
         return max(0, int((datetime.now(timezone.utc) - entry_dt).total_seconds() / 60))
     except Exception:
         return 0
+
+
+def _paper_exit_value(pos: dict, quantity: float, price: float) -> tuple[float, float]:
+    """Returns net paper proceeds and modeled sell fee; live records stay unchanged."""
+    gross = quantity * price
+    fee_rate = float(pos.get("paper_fee_rate_pct", 0.0) or 0.0) if pos.get("mode") == "paper" else 0.0
+    fee = gross * fee_rate / 100.0
+    return gross - fee, fee
+
+
+def _early_failure_reason(pos: dict, current_price: float) -> str:
+    """Exits breakouts that fail to produce prompt follow-through."""
+    if not EARLY_FAILURE_EXIT_ENABLED or pos.get("quick_take_profit_taken") or pos.get("partial_take_profit_taken"):
+        return ""
+    held = _position_held_minutes(pos)
+    if held < EARLY_FAILURE_MIN_HOLD_MINUTES or held > EARLY_FAILURE_MAX_HOLD_MINUTES:
+        return ""
+    profit_pct = _position_profit_pct(pos, current_price)
+    entry = float(pos.get("entry_price", 0.0) or 0.0)
+    peak = float(pos.get("highest_tracked_price", entry) or entry)
+    peak_pct = ((peak - entry) / entry * 100.0) if entry else 0.0
+    if profit_pct <= EARLY_FAILURE_MIN_LOSS_PCT and peak_pct <= EARLY_FAILURE_MAX_PROFIT_PCT:
+        return f"EARLY_BREAKOUT_FAILURE_NO_FOLLOW_THROUGH_{held}M"
+    return ""
 
 
 def _entry_review_snapshot(pos: dict) -> dict:
@@ -3534,7 +3618,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
             if sell_fraction > 0.0:
                 partial_qty = float(pos["simulated_qty"]) * sell_fraction
                 partial_allocated = float(pos.get("allocated_usd", CAPITAL_PER_TRADE_USD) or 0.0) * sell_fraction
-                partial_value = partial_qty * current_price
+                partial_value, paper_exit_fee = _paper_exit_value(pos, partial_qty, current_price)
                 pnl_usd = partial_value - partial_allocated
                 pnl_pct = (pnl_usd / partial_allocated) * 100 if partial_allocated else 0.0
                 mode_label = "LIVE SELL" if pos.get("mode") == "live" else "PAPER SELL"
@@ -3589,6 +3673,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                         "pnl_usd":        pnl_usd,
                         "pnl_percentage": pnl_pct,
                         "status":         "PARTIAL",
+                        "paper_exit_fee_usd": paper_exit_fee,
                     },
                     "entry_review": _entry_review_snapshot(pos),
                 }
@@ -3619,7 +3704,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
             elif sell_fraction > 0.0:
                 partial_qty = float(pos["simulated_qty"]) * sell_fraction
                 partial_allocated = float(pos.get("allocated_usd", CAPITAL_PER_TRADE_USD) or 0.0) * sell_fraction
-                partial_value = partial_qty * current_price
+                partial_value, paper_exit_fee = _paper_exit_value(pos, partial_qty, current_price)
                 pnl_usd = partial_value - partial_allocated
                 pnl_pct = (pnl_usd / partial_allocated) * 100 if partial_allocated else 0.0
                 mode_label = "LIVE SELL" if pos.get("mode") == "live" else "PAPER SELL"
@@ -3681,6 +3766,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                         "pnl_usd":        pnl_usd,
                         "pnl_percentage": pnl_pct,
                         "status":         "PARTIAL",
+                        "paper_exit_fee_usd": paper_exit_fee,
                     },
                     "entry_review": _entry_review_snapshot(pos),
                 }
@@ -3713,6 +3799,9 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                 print(f"  {msg}")
                 send_discord_alert(msg)
                 continue
+        elif (early_failure := _early_failure_reason(pos, current_price)):
+            exit_triggered = True
+            exit_reason = early_failure
         elif current_price <= pos["current_trailing_stop"]:
             exit_triggered = True
             exit_reason    = "TRAILING_STOP_LOSS_TRIGGERED"
@@ -3729,7 +3818,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
 
         if exit_triggered:
             initial_value = pos.get("allocated_usd", CAPITAL_PER_TRADE_USD)
-            final_value   = pos["simulated_qty"] * current_price
+            final_value, paper_exit_fee = _paper_exit_value(pos, pos["simulated_qty"], current_price)
             pnl_usd       = final_value - initial_value
             pnl_pct       = (pnl_usd / initial_value) * 100
             mode_label    = "LIVE SELL" if pos.get("mode") == "live" else "PAPER SELL"
@@ -3774,6 +3863,7 @@ def manage_active_positions(client, active_positions: dict, live_prices: dict, d
                     "pnl_usd":        pnl_usd,
                     "pnl_percentage": pnl_pct,
                     "status":         "CLOSED",
+                    "paper_exit_fee_usd": paper_exit_fee,
                 },
                 "entry_review": _entry_review_snapshot(pos),
             }
