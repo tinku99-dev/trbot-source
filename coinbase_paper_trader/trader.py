@@ -171,6 +171,14 @@ OBV_LOOKBACK_CANDLES    = int(os.environ.get("OBV_LOOKBACK_CANDLES", "12"))
 MIN_OBV_PRESSURE_PCT    = float(os.environ.get("MIN_OBV_PRESSURE_PCT", "8.0"))
 MIN_OBV_UP_VOLUME_RATIO = float(os.environ.get("MIN_OBV_UP_VOLUME_RATIO", "0.52"))
 
+# Distribution-phase shadow filter. This records and reports coins that would
+# be rejected by a longer-horizon flow check, but deliberately does NOT block
+# entries until enough live outcomes have accumulated for comparison.
+DISTRIBUTION_SHADOW_ENABLED = os.environ.get("DISTRIBUTION_SHADOW_ENABLED", "true").lower() == "true"
+DISTRIBUTION_SHADOW_BLOCK_SCORE = float(os.environ.get("DISTRIBUTION_SHADOW_BLOCK_SCORE", "50"))
+DISTRIBUTION_OBV_BEARISH_PCT = float(os.environ.get("DISTRIBUTION_OBV_BEARISH_PCT", "-15"))
+DISTRIBUTION_DOWN_VOLUME_RATIO = float(os.environ.get("DISTRIBUTION_DOWN_VOLUME_RATIO", "0.58"))
+
 # Market-regime guard: most alt breakouts fail when BTC is rolling over. New
 # entries are allowed only when BTC is not in a short-term pullback, and each
 # alt must show relative strength vs BTC on the 1h window.
@@ -1834,6 +1842,104 @@ def calculate_obv_metrics(candles: list[list], lookback: int = OBV_LOOKBACK_CAND
     }
 
 
+def analyze_distribution_phase(candles: list[list]) -> dict:
+    """Scores longer-horizon selling/distribution without affecting entries."""
+    empty = {
+        "enabled": DISTRIBUTION_SHADOW_ENABLED,
+        "score": 0.0,
+        "phase": "UNKNOWN",
+        "would_block": False,
+        "reasons": [],
+    }
+    if not DISTRIBUTION_SHADOW_ENABLED or len(candles) < 49:
+        return empty
+
+    lookback_4h = min(48, len(candles) - 1)
+    lookback_24h = min(288, len(candles) - 1)
+    obv_1h = calculate_obv_metrics(candles, min(12, len(candles) - 1))
+    obv_4h = calculate_obv_metrics(candles, lookback_4h)
+    obv_24h = calculate_obv_metrics(candles, lookback_24h)
+    price_1h = candle_change_pct(candles, min(12, len(candles)))
+    price_4h = candle_change_pct(candles, min(48, len(candles)))
+    price_24h = candle_change_pct(candles, min(288, len(candles)))
+
+    window = candles[-lookback_4h:]
+    volumes = sorted(float(c[5] or 0.0) for c in window)
+    median_volume = volumes[len(volumes) // 2] if volumes else 0.0
+    down_volume = 0.0
+    total_volume = 0.0
+    high_volume_red = 0
+    upper_wick_rejections = 0
+    for candle in window:
+        _, low, high, open_price, close, volume = candle
+        low = float(low or 0.0)
+        high = float(high or 0.0)
+        open_price = float(open_price or 0.0)
+        close = float(close or 0.0)
+        volume = float(volume or 0.0)
+        total_volume += volume
+        if close < open_price:
+            down_volume += volume
+            if median_volume > 0 and volume >= median_volume * 1.5:
+                high_volume_red += 1
+        candle_range = high - low
+        upper_wick = high - max(open_price, close)
+        if candle_range > 0 and upper_wick / candle_range >= 0.55 and close <= open_price:
+            upper_wick_rejections += 1
+
+    down_volume_ratio = down_volume / total_volume if total_volume else 0.0
+    pressure_4h = float(obv_4h.get("obv_pressure_pct", 0.0) or 0.0)
+    pressure_24h = float(obv_24h.get("obv_pressure_pct", 0.0) or 0.0)
+    score = 0.0
+    reasons: list[str] = []
+
+    if price_4h > 0.75 and pressure_4h < 0:
+        score += 30
+        reasons.append(f"4h price/OBV bearish divergence ({price_4h:+.2f}%/{pressure_4h:+.1f}%)")
+    if pressure_4h <= DISTRIBUTION_OBV_BEARISH_PCT:
+        score += 25
+        reasons.append(f"4h OBV pressure {pressure_4h:+.1f}%")
+    if pressure_24h <= DISTRIBUTION_OBV_BEARISH_PCT:
+        score += 15
+        reasons.append(f"long OBV pressure {pressure_24h:+.1f}%")
+    if down_volume_ratio >= DISTRIBUTION_DOWN_VOLUME_RATIO:
+        score += 20
+        reasons.append(f"4h down-volume ratio {down_volume_ratio:.2f}")
+    if high_volume_red >= 2:
+        score += 15
+        reasons.append(f"{high_volume_red} high-volume red candles")
+    if upper_wick_rejections >= 3:
+        score += 10
+        reasons.append(f"{upper_wick_rejections} upper-wick rejections")
+
+    score = min(100.0, score)
+    would_block = score >= DISTRIBUTION_SHADOW_BLOCK_SCORE
+    if would_block:
+        phase = "DISTRIBUTION"
+    elif price_4h > 0 and pressure_4h > 0:
+        phase = "MARKUP"
+    elif price_4h <= 0 and pressure_4h < 0:
+        phase = "MARKDOWN"
+    else:
+        phase = "NEUTRAL"
+    return {
+        "enabled": True,
+        "score": round(score, 1),
+        "phase": phase,
+        "would_block": would_block,
+        "reasons": reasons,
+        "price_change_1h": round(price_1h, 3),
+        "price_change_4h": round(price_4h, 3),
+        "price_change_24h": round(price_24h, 3),
+        "obv_pressure_1h": float(obv_1h.get("obv_pressure_pct", 0.0) or 0.0),
+        "obv_pressure_4h": pressure_4h,
+        "obv_pressure_24h": pressure_24h,
+        "down_volume_ratio_4h": round(down_volume_ratio, 3),
+        "high_volume_red_candles_4h": high_volume_red,
+        "upper_wick_rejections_4h": upper_wick_rejections,
+    }
+
+
 def get_btc_market_context() -> dict:
     """Returns whether new alt entries are allowed under the BTC regime guard."""
     candles = fetch_candles("BTC-USD")
@@ -2282,6 +2388,7 @@ def get_market_snapshot_public() -> tuple[list[dict], dict]:
             "bollinger_score":       bollinger["bollinger_score"],
             "bollinger_features":    bollinger["features"],
             "obv":                   obv,
+            "distribution_shadow":   analyze_distribution_phase(candles),
         }
         momentum = detect_momentum_runner_signal(product)
         product["momentum_runner_score"] = momentum["momentum_runner_score"]
@@ -2527,6 +2634,17 @@ def _watchlist_quality_score(product_data: dict) -> float:
     return liquidity_score + movement_score + strategy_score
 
 
+def _directional_watchlist_quality_score(product_data: dict) -> float:
+    """Shadow ranking that favors constructive upside and penalizes distribution."""
+    current = _watchlist_quality_score(product_data)
+    move_24h = float(product_data.get("price_change_24h", 0.0) or 0.0)
+    move_1h = float(product_data.get("price_change_1h", 0.0) or 0.0)
+    distribution = product_data.get("distribution_shadow", {}) or {}
+    adjustment = min(18.0, max(-18.0, move_24h * 1.2)) + min(12.0, max(-12.0, move_1h * 4.0))
+    adjustment -= float(distribution.get("score", 0.0) or 0.0) * 0.35
+    return round(current + adjustment, 2)
+
+
 def build_shadow_candidate(product_data: dict, signal: dict, liquidity: dict,
                            obv: dict, mtf_scores: dict) -> dict:
     """Builds one row for the batched 'would buy with more budget' summary."""
@@ -2669,6 +2787,7 @@ def _open_position_from_entry(
         "entry_support_floor":    float(structure.get("support_floor", 0.0) or 0.0),
         "entry_stop_distance_pct": float(structure.get("stop_distance_pct", 0.0) or 0.0),
         "entry_sizing_notes":     list(sizing_reasons),
+        "entry_distribution_shadow": product_data.get("distribution_shadow", {}),
     }
     return {
         "crypto_qty": crypto_qty,
@@ -2827,6 +2946,11 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "price_change_1h": round(float(prod.get("price_change_1h", 0.0) or 0.0), 2),
             "dollar_volume_24h": round(float(liquidity.get("dollar_volume_24h", 0.0) or 0.0), 2),
             "obv_pressure_pct": round(float(obv.get("metrics", {}).get("obv_pressure_pct", 0.0) or 0.0), 2),
+            "distribution_shadow_score": round(float((prod.get("distribution_shadow", {}) or {}).get("score", 0.0) or 0.0), 1),
+            "distribution_shadow_phase": str((prod.get("distribution_shadow", {}) or {}).get("phase", "UNKNOWN")),
+            "distribution_shadow_would_block": bool((prod.get("distribution_shadow", {}) or {}).get("would_block", False)),
+            "distribution_shadow_reasons": list((prod.get("distribution_shadow", {}) or {}).get("reasons", [])),
+            "directional_discovery_score": _directional_watchlist_quality_score(prod),
             "buy_range_low": round(float(structure.get("buy_zone_low", price) or price), 6),
             "buy_range_high": round(float(structure.get("buy_zone_high", price * 1.005) or (price * 1.005)), 6),
             "support_level": round(float(structure.get("support_level", 0.0) or 0.0), 6),
@@ -2866,6 +2990,8 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "high_consensus_take_profit_pct": HIGH_CONSENSUS_TAKE_PROFIT_PERCENT,
             "trailing_pct": TRAILING_PERCENT,
             "min_signal_score": MIN_SIGNAL_SCORE,
+            "distribution_shadow_enabled": DISTRIBUTION_SHADOW_ENABLED,
+            "distribution_shadow_block_score": DISTRIBUTION_SHADOW_BLOCK_SCORE,
         },
         "positions": positions,
         "setups": top,
@@ -3077,6 +3203,7 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
             prod["bollinger_features"] = bollinger["features"]
             prod["bollinger_score"] = bollinger["bollinger_score"]
             prod["obv"] = calculate_obv_metrics(candles)
+            prod["distribution_shadow"] = analyze_distribution_phase(candles)
             prod["recent_window_dollar_volume"] = round(recent_dollar_volume(candles), 2)
             prod["price_change_15m"] = round(candle_change_pct(candles, 3), 3)
             prod["price_change_1h"] = round(candle_change_pct(candles, 12), 3)
@@ -3169,6 +3296,14 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
         if not structure["ok"]:
             print(f"  [STRUCTURE SKIP] {product_id}: {structure['reason']}")
             continue
+
+        distribution_shadow = prod.get("distribution_shadow", {}) or {}
+        if signal.get("eligible") and distribution_shadow.get("would_block"):
+            shadow_reason = "; ".join(distribution_shadow.get("reasons", [])) or "distribution score"
+            print(
+                f"  [DISTRIBUTION SHADOW] {product_id}: would block score "
+                f"{float(distribution_shadow.get('score', 0.0) or 0.0):.0f} — {shadow_reason}"
+            )
 
         if MARKET_REGIME_FILTER and product_id != "BTC-USD":
             coin_1h = float(prod.get("price_change_1h", 0.0) or 0.0)
@@ -3445,6 +3580,7 @@ def _entry_review_snapshot(pos: dict) -> dict:
         "entry_bollinger_score": float(pos.get("bollinger_score", 0.0) or 0.0),
         "entry_wedge_score": float(pos.get("wedge_score", 0.0) or 0.0),
         "entry_momentum_runner_score": float(pos.get("momentum_runner_score", 0.0) or 0.0),
+        "entry_distribution_shadow": pos.get("entry_distribution_shadow", {}),
     }
 
 
@@ -4271,6 +4407,44 @@ def summarize_trade_patterns(history: list) -> dict:
     rows = [_finalize_pattern_bucket(bucket) for bucket in buckets.values()]
     rows.sort(key=lambda row: (row["realizedPnlUsd"], row["closedTrades"]), reverse=True)
 
+    # Evaluate the shadow decision by complete position, combining quick/main
+    # partials with the final close so partial-profit trades are not mislabeled.
+    round_trips: dict[tuple[str, str], dict] = {}
+    for trade in unique_events:
+        entry = trade.get("entry") or {}
+        key = (str(trade.get("product_id") or ""), str(entry.get("timestamp") or ""))
+        group = round_trips.setdefault(key, {"pnl": 0.0, "closed": False, "shadow": {}})
+        perf = trade.get("performance") or {}
+        group["pnl"] += _safe_float(perf.get("pnl_usd"))
+        if perf.get("status") == "CLOSED":
+            group["closed"] = True
+        review_shadow = (trade.get("entry_review") or {}).get("entry_distribution_shadow") or {}
+        if review_shadow:
+            group["shadow"] = review_shadow
+
+    distribution_shadow_stats = {
+        "recordedPositions": 0,
+        "wouldBlock": {"positions": 0, "wins": 0, "realizedPnlUsd": 0.0},
+        "wouldAllow": {"positions": 0, "wins": 0, "realizedPnlUsd": 0.0},
+    }
+    for group in round_trips.values():
+        if not group["closed"] or not group["shadow"]:
+            continue
+        distribution_shadow_stats["recordedPositions"] += 1
+        bucket_name = "wouldBlock" if group["shadow"].get("would_block") else "wouldAllow"
+        shadow_bucket = distribution_shadow_stats[bucket_name]
+        shadow_bucket["positions"] += 1
+        shadow_bucket["realizedPnlUsd"] += group["pnl"]
+        if group["pnl"] > 0:
+            shadow_bucket["wins"] += 1
+    for shadow_bucket in (
+        distribution_shadow_stats["wouldBlock"],
+        distribution_shadow_stats["wouldAllow"],
+    ):
+        positions = shadow_bucket["positions"]
+        shadow_bucket["realizedPnlUsd"] = round(shadow_bucket["realizedPnlUsd"], 2)
+        shadow_bucket["winRatePct"] = round(shadow_bucket["wins"] / positions * 100, 2) if positions else 0.0
+
     return {
         "enabledEntryStrategies": enabled_entry_strategy_names() or ["ALL"],
         "realizedEvents": len(unique_events),
@@ -4283,6 +4457,7 @@ def summarize_trade_patterns(history: list) -> dict:
         "strategyCount": len(rows),
         "strategyStats": rows,
         "exitReasons": dict(sorted(exit_reasons.items(), key=lambda item: (-item[1], item[0]))),
+        "distributionShadow": distribution_shadow_stats,
         "recommendation": _pattern_review_recommendation(rows),
     }
 
