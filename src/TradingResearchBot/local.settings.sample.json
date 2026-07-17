@@ -35,10 +35,15 @@
     "Bot__Options__Enabled": "true",
     "Bot__Options__Provider": "Mock",
 
-    "//PaperTrading": "Simulated sizing added to Discord research alerts; no live orders are placed",
+    "//PaperTrading": "Stock orders can only use Alpaca's paper endpoint; submission is off until explicitly armed",
     "Bot__PaperTrading__Enabled": "true",
     "Bot__PaperTrading__CapitalPerTradeUsd": "1000",
     "Bot__PaperTrading__MaxOpenPositions": "10",
+    "Bot__PaperTrading__SubmitToAlpaca": "false",
+    "Bot__PaperTrading__MinCandidateScore": "70",
+    "Bot__PaperTrading__MaxNewPositionsPerDay": "2",
+    "Bot__PaperTrading__MaxAccountExposurePct": "25",
+    "Bot__PaperTrading__RiskPerTradePct": "0.5",
     "PaperTradingState__DataDir": "/Users/tinku/CodingHelp/trailing-stop-azure-function",
 
     "//Scalp": "Alpaca-backed crypto scalp scanner with OBV accumulation confirmation",
@@ -53,6 +58,7 @@
     "Bot__Providers__Alpaca__ApiKeyId": "",
     "Bot__Providers__Alpaca__ApiSecret": "",
     "Bot__Providers__Alpaca__BaseUrl": "https://data.alpaca.markets",
+    "Bot__Providers__Alpaca__PaperTradingBaseUrl": "https://paper-api.alpaca.markets",
     "Bot__Providers__Alpaca__Feed": "iex",
 
     "//Notifications": "Provider = None | Discord | Email | Both",

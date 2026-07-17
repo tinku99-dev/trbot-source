@@ -53,7 +53,9 @@ public sealed class RunNowHttpFunction
                 c.Target1,
                 c.Target2,
                 option = c.OptionIdea is null ? null : c.OptionIdea.Describe(),
-                patterns = c.Patterns.Distinct()
+                patterns = c.Patterns.Distinct(),
+                institutional = c.Institutional,
+                alpacaPaperOrder = c.AlpacaPaperOrder
             }),
             rejected = report.Rejected.Select(c => new
             {

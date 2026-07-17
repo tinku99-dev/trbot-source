@@ -190,8 +190,32 @@ DISTRIBUTION_SHADOW_BLOCK_SCORE = float(os.environ.get("DISTRIBUTION_SHADOW_BLOC
 DISTRIBUTION_OBV_BEARISH_PCT = float(os.environ.get("DISTRIBUTION_OBV_BEARISH_PCT", "-15"))
 DISTRIBUTION_DOWN_VOLUME_RATIO = float(os.environ.get("DISTRIBUTION_DOWN_VOLUME_RATIO", "0.58"))
 DISTRIBUTION_DYNAMIC_BASELINE_ENABLED = os.environ.get("DISTRIBUTION_DYNAMIC_BASELINE_ENABLED", "true").lower() == "true"
-DISTRIBUTION_BASELINE_DAYS = int(os.environ.get("DISTRIBUTION_BASELINE_DAYS", "7"))
-DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER = float(os.environ.get("DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER", "0.75"))
+DISTRIBUTION_BASELINE_DAYS = int(os.environ.get("DISTRIBUTION_BASELINE_DAYS", os.environ.get("DYNAMIC_LOOKBACK_DAYS", "14")))
+DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER = float(os.environ.get("DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER", "2.0"))
+
+# Optional licensed/cross-exchange institutional metrics. The URL template must
+# return JSON fields documented in local.settings.json.example. When it is blank
+# or unavailable the new gates fail open and record `available=false`; the bot
+# never invents OI, funding, liquidation, or perpetual-flow data.
+INSTITUTIONAL_DERIVATIVES_ENABLED = os.environ.get("INSTITUTIONAL_DERIVATIVES_ENABLED", "true").lower() == "true"
+DERIVATIVES_METRICS_URL_TEMPLATE = os.environ.get("DERIVATIVES_METRICS_URL_TEMPLATE", "").strip()
+DERIVATIVES_METRICS_API_KEY = os.environ.get("DERIVATIVES_METRICS_API_KEY", "").strip()
+DERIVATIVES_METRICS_TIMEOUT_SECONDS = int(os.environ.get("DERIVATIVES_METRICS_TIMEOUT_SECONDS", "8"))
+INSTITUTIONAL_METRICS_SCAN_LIMIT = int(os.environ.get("INSTITUTIONAL_METRICS_SCAN_LIMIT", "12"))
+OI_VALIDATION_ENABLED = os.environ.get("OI_VALIDATION_ENABLED", "true").lower() == "true"
+MIN_OI_EXPANSION_PCT = float(os.environ.get("MIN_OI_EXPANSION_PCT", "10.0"))
+FUNDING_RATE_GATE_ENABLED = os.environ.get("FUNDING_RATE_GATE_ENABLED", "true").lower() == "true"
+MAX_FUNDING_RATE_8H_PCT = float(os.environ.get("MAX_FUNDING_RATE_8H_PCT", "0.05"))
+LIQUIDATION_CATCH_ENABLED = os.environ.get("LIQUIDATION_CATCH_ENABLED", "true").lower() == "true"
+LIQUIDATION_CATCH_MIN_SCORE = float(os.environ.get("LIQUIDATION_CATCH_MIN_SCORE", "85"))
+LIQUIDATION_CATCH_SIGMA = float(os.environ.get("LIQUIDATION_CATCH_SIGMA", "3.0"))
+LIQUIDATION_CATCH_MIN_PERCENTILE = float(os.environ.get("LIQUIDATION_CATCH_MIN_PERCENTILE", "95"))
+LIQUIDATION_CATCH_MAX_OI_CHANGE_PCT = float(os.environ.get("LIQUIDATION_CATCH_MAX_OI_CHANGE_PCT", "-5"))
+LIQUIDATION_CATCH_ATR_MULTIPLIER = float(os.environ.get("LIQUIDATION_CATCH_ATR_MULTIPLIER", "2.5"))
+CVD_DIVERGENCE_ENABLED = os.environ.get("CVD_DIVERGENCE_ENABLED", "true").lower() == "true"
+CVD_DIVERGENCE_MIN_SCORE = float(os.environ.get("CVD_DIVERGENCE_MIN_SCORE", "80"))
+CVD_MIN_SPOT_BUY_DOMINANCE = float(os.environ.get("CVD_MIN_SPOT_BUY_DOMINANCE", "0.55"))
+CVD_MAX_PERP_BUY_DOMINANCE = float(os.environ.get("CVD_MAX_PERP_BUY_DOMINANCE", "0.50"))
 
 # Bounded public order-book guard. We walk Coinbase's aggregated price/size
 # levels to estimate spread, depth and average buy execution cost.
@@ -204,9 +228,10 @@ ORDER_BOOK_TIMEOUT_SECONDS = int(os.environ.get("ORDER_BOOK_TIMEOUT_SECONDS", "8
 # Scale-in volatility and post-loss correlation controls.
 MAX_SCALE_IN_ATR_MULTIPLIER = float(os.environ.get("MAX_SCALE_IN_ATR_MULTIPLIER", "1.50"))
 CORRELATED_COOLDOWN_ENABLED = os.environ.get("CORRELATED_COOLDOWN_ENABLED", "true").lower() == "true"
-CORRELATED_COOLDOWN_HOURS = float(os.environ.get("CORRELATED_COOLDOWN_HOURS", "3"))
-CORRELATED_COOLDOWN_MIN_CORRELATION = float(os.environ.get("CORRELATED_COOLDOWN_MIN_CORRELATION", "0.90"))
+CORRELATED_COOLDOWN_HOURS = float(os.environ.get("CORRELATED_COOLDOWN_HOURS", "8"))
+CORRELATED_COOLDOWN_MIN_CORRELATION = float(os.environ.get("CORRELATED_COOLDOWN_MIN_CORRELATION", os.environ.get("CORRELATION_COOLDOWN_THRESHOLD", "0.85")))
 CORRELATED_COOLDOWN_MIN_POINTS = int(os.environ.get("CORRELATED_COOLDOWN_MIN_POINTS", "6"))
+CORRELATION_SCORE_PENALTY = float(os.environ.get("CORRELATION_SCORE_PENALTY", "25"))
 
 # Market-regime guard: most alt breakouts fail when BTC is rolling over. New
 # entries are allowed only when BTC is not in a short-term pullback, and each
@@ -354,10 +379,12 @@ EARLY_FAILURE_MAX_PROFIT_PCT = float(os.environ.get("EARLY_FAILURE_MAX_PROFIT_PC
 EARLY_FAILURE_MIN_LOSS_PCT = float(os.environ.get("EARLY_FAILURE_MIN_LOSS_PCT", "-0.35"))
 FAILED_ENTRY_COOLDOWN_HOURS = float(os.environ.get("FAILED_ENTRY_COOLDOWN_HOURS", "8"))
 STAGNANT_EXIT_ENABLED = os.environ.get("STAGNANT_EXIT_ENABLED", "true").lower() == "true"
-STAGNANT_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("STAGNANT_EXIT_MIN_HOLD_MINUTES", "90"))
+STAGNANT_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("STAGNANT_EXIT_MIN_HOLD_MINUTES", os.environ.get("STAGNANCY_EXIT_MINUTES", "60")))
 STAGNANT_EXIT_MAX_ABS_PNL_PCT = float(os.environ.get("STAGNANT_EXIT_MAX_ABS_PNL_PCT", "0.35"))
 STAGNANT_EXIT_MAX_RANGE_PCT = float(os.environ.get("STAGNANT_EXIT_MAX_RANGE_PCT", "1.0"))
 STAGNANT_EXIT_MAX_VOLUME_RATIO = float(os.environ.get("STAGNANT_EXIT_MAX_VOLUME_RATIO", "0.75"))
+STAGNANCY_ATR_THRESHOLD_FACTOR = float(os.environ.get("STAGNANCY_ATR_THRESHOLD_FACTOR", "0.5"))
+STAGNANCY_CONSECUTIVE_15M_BARS = int(os.environ.get("STAGNANCY_CONSECUTIVE_15M_BARS", "4"))
 
 # Periodic Discord performance summary (total P/L, gain/loss, coins bought).
 SUMMARY_INTERVAL_HOURS = float(os.environ.get("SUMMARY_INTERVAL_HOURS", "6"))
@@ -1775,6 +1802,198 @@ def detect_momentum_runner_signal(product_data: dict) -> dict:
     return {"momentum_runner_score": round(min(score, 100.0), 1), "features": features}
 
 
+def fetch_institutional_derivatives_metrics(product_id: str) -> dict:
+    """Fetches normalized licensed derivatives metrics; unavailable data fails open."""
+    empty = {"available": False, "source": "unconfigured", "product_id": product_id}
+    if not INSTITUTIONAL_DERIVATIVES_ENABLED or not DERIVATIVES_METRICS_URL_TEMPLATE:
+        return empty
+    base_asset = product_id.split("-", 1)[0].upper()
+    url = DERIVATIVES_METRICS_URL_TEMPLATE.replace(
+        "{product_id}", urllib.parse.quote(product_id, safe="")
+    ).replace("{base}", urllib.parse.quote(base_asset, safe=""))
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return {**empty, "source": "invalid_https_url"}
+    headers = {"Accept": "application/json", "User-Agent": "coinbase-paper-trader/2.0"}
+    if DERIVATIVES_METRICS_API_KEY:
+        headers["Authorization"] = f"Bearer {DERIVATIVES_METRICS_API_KEY}"
+    try:
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(request, timeout=DERIVATIVES_METRICS_TIMEOUT_SECONDS) as response:  # nosec B310
+            raw = json.loads(response.read().decode("utf-8"))
+        payload = raw.get("data", raw) if isinstance(raw, dict) else {}
+        if not isinstance(payload, dict):
+            return {**empty, "source": "invalid_payload"}
+
+        def number(name: str):
+            value = payload.get(name)
+            try:
+                return float(value) if value is not None and value != "" else None
+            except (TypeError, ValueError):
+                return None
+
+        normalized = {
+            "available": True,
+            "source": str(payload.get("source") or parsed.netloc),
+            "product_id": product_id,
+            "open_interest": number("open_interest"),
+            "open_interest_change_24h_pct": number("open_interest_change_24h_pct"),
+            "funding_rate_8h_pct": number("funding_rate_8h_pct"),
+            "long_liquidations_usd": number("long_liquidations_usd"),
+            "long_liquidation_percentile_7d": number("long_liquidation_percentile_7d"),
+            "spot_cvd_slope": number("spot_cvd_slope"),
+            "spot_buy_dominance": number("spot_buy_dominance"),
+            "perp_buy_dominance": number("perp_buy_dominance"),
+            "observed_at": payload.get("observed_at"),
+        }
+        normalized["available"] = any(
+            normalized.get(key) is not None for key in (
+                "open_interest_change_24h_pct", "funding_rate_8h_pct",
+                "long_liquidation_percentile_7d", "spot_cvd_slope",
+            )
+        )
+        return normalized
+    except Exception as exc:
+        print(f"  [DERIVATIVES DATA] {product_id}: unavailable ({exc})")
+        return {**empty, "source": "request_failed", "error": str(exc)[:160]}
+
+
+def apply_oi_validation_to_momentum(product_data: dict) -> None:
+    """Adds institutional weight to runners with expanding OI; halves weak-OI pumps."""
+    features = dict(product_data.get("momentum_runner_features", {}) or {})
+    score = float(product_data.get("momentum_runner_score", 0.0) or 0.0)
+    metrics = product_data.get("derivatives_metrics", {}) or {}
+    oi_change = metrics.get("open_interest_change_24h_pct")
+    features["oi_validation_enabled"] = OI_VALIDATION_ENABLED
+    features["oi_change_24h_pct"] = oi_change
+    if not OI_VALIDATION_ENABLED or score <= 0:
+        features["oi_validation"] = "disabled"
+    elif oi_change is None:
+        features["oi_validation"] = "unavailable_fail_open"
+    elif float(oi_change) >= MIN_OI_EXPANSION_PCT:
+        score = min(100.0, score + 10.0)
+        features["oi_validation"] = "confirmed"
+        features["institutional_oi_bonus"] = 10.0
+    else:
+        score *= 0.5
+        features["oi_validation"] = "penalized"
+        features["oi_penalty_multiplier"] = 0.5
+    product_data["momentum_runner_score"] = round(score, 1)
+    product_data["momentum_runner_features"] = features
+
+
+def _atr_value(candles: list[list], period: int = 14) -> float:
+    if len(candles) < 2:
+        return 0.0
+    true_ranges = []
+    for index in range(1, len(candles)):
+        high = float(candles[index][2] or 0.0)
+        low = float(candles[index][1] or 0.0)
+        previous_close = float(candles[index - 1][4] or 0.0)
+        true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+    window = true_ranges[-max(1, min(period, len(true_ranges))):]
+    return sum(window) / len(window) if window else 0.0
+
+
+def detect_liquidation_cascade_signal(product_data: dict, candles: list[list]) -> dict:
+    """Detects a provider-confirmed forced-liquidation flush and computes a low-ball limit."""
+    if not LIQUIDATION_CATCH_ENABLED or len(candles) < 30:
+        return {"liquidation_score": 0.0, "features": {}}
+    metrics = product_data.get("derivatives_metrics", {}) or {}
+    percentile = metrics.get("long_liquidation_percentile_7d")
+    oi_change = metrics.get("open_interest_change_24h_pct")
+    if percentile is None or oi_change is None:
+        return {"liquidation_score": 0.0, "features": {"validation": "derivatives_data_unavailable"}}
+
+    returns = []
+    for index in range(1, len(candles)):
+        previous = float(candles[index - 1][4] or 0.0)
+        current = float(candles[index][4] or 0.0)
+        if previous > 0:
+            returns.append((current - previous) / previous)
+    baseline = returns[-29:-1]
+    if len(baseline) < 10:
+        return {"liquidation_score": 0.0, "features": {}}
+    mean = sum(baseline) / len(baseline)
+    stddev = (sum((value - mean) ** 2 for value in baseline) / len(baseline)) ** 0.5
+    latest_return = returns[-1]
+    downside_sigma = (mean - latest_return) / stddev if stddev > 0 else 0.0
+    atr = _atr_value(candles[:-1], ATR_PERIOD)
+    price = float(product_data.get("price", candles[-1][4]) or candles[-1][4] or 0.0)
+    limit_price = max(0.0, price - LIQUIDATION_CATCH_ATR_MULTIPLIER * atr)
+
+    sigma_ok = downside_sigma >= LIQUIDATION_CATCH_SIGMA
+    liquidation_ok = float(percentile) >= LIQUIDATION_CATCH_MIN_PERCENTILE
+    oi_flush = float(oi_change) <= LIQUIDATION_CATCH_MAX_OI_CHANGE_PCT
+    score = (40.0 if sigma_ok else 0.0) + (35.0 if liquidation_ok else 0.0) + (25.0 if oi_flush else 0.0)
+    if not (sigma_ok and liquidation_ok and oi_flush and limit_price > 0):
+        score = 0.0
+    return {
+        "liquidation_score": round(score, 1),
+        "features": {
+            "strategy": "LIQUIDATION_CASCADE_CATCH",
+            "downside_sigma": round(downside_sigma, 2),
+            "long_liquidation_percentile_7d": float(percentile),
+            "open_interest_change_24h_pct": float(oi_change),
+            "atr": round(atr, 10),
+            "atr_multiplier": LIQUIDATION_CATCH_ATR_MULTIPLIER,
+            "liquidation_limit_price": round(limit_price, 10),
+            "limit_only": True,
+        },
+    }
+
+
+def detect_cvd_divergence_signal(product_data: dict, candles: list[list]) -> dict:
+    """Scores true provider-supplied spot/perpetual CVD divergence; no candle proxy is used."""
+    if not CVD_DIVERGENCE_ENABLED or len(candles) < 12:
+        return {"cvd_score": 0.0, "features": {}}
+    metrics = product_data.get("derivatives_metrics", {}) or {}
+    slope = metrics.get("spot_cvd_slope")
+    spot_buy = metrics.get("spot_buy_dominance")
+    perp_buy = metrics.get("perp_buy_dominance")
+    if slope is None or spot_buy is None or perp_buy is None:
+        return {"cvd_score": 0.0, "features": {"validation": "cross_exchange_cvd_unavailable"}}
+    c15 = aggregate_candles(candles, 3)
+    price_change = candle_change_pct(c15, min(4, len(c15)))
+    price_flat_or_lower = price_change <= 0.5
+    confirmed = (
+        price_flat_or_lower and float(slope) > 0
+        and float(spot_buy) >= CVD_MIN_SPOT_BUY_DOMINANCE
+        and float(perp_buy) <= CVD_MAX_PERP_BUY_DOMINANCE
+    )
+    score = 0.0
+    if confirmed:
+        score = 40.0 + min(25.0, float(slope) * 10.0) + 20.0 + 15.0
+    return {
+        "cvd_score": round(min(100.0, score), 1),
+        "features": {
+            "strategy": "SPOT_CVD_DIVERGENCE",
+            "price_change_1h_pct": round(price_change, 3),
+            "spot_cvd_slope": float(slope),
+            "spot_buy_dominance": float(spot_buy),
+            "perp_buy_dominance": float(perp_buy),
+            "cross_exchange_confirmed": confirmed,
+        },
+    }
+
+
+def derivatives_regime_gate(product_data: dict) -> dict:
+    """Blocks crowded long funding only when a normalized 8-hour rate is available."""
+    metrics = product_data.get("derivatives_metrics", {}) or {}
+    funding = metrics.get("funding_rate_8h_pct")
+    if not FUNDING_RATE_GATE_ENABLED:
+        return {"ok": True, "reason": "funding gate disabled", "available": funding is not None}
+    if funding is None:
+        return {"ok": True, "reason": "funding unavailable (fail open)", "available": False}
+    if float(funding) > MAX_FUNDING_RATE_8H_PCT:
+        return {
+            "ok": False,
+            "reason": f"8h funding {float(funding):.4f}% > {MAX_FUNDING_RATE_8H_PCT:.4f}%",
+            "available": True,
+        }
+    return {"ok": True, "reason": "funding regime OK", "available": True}
+
+
 def select_entry_signal(product_data: dict) -> dict:
     """
     Returns the strongest currently buyable signal for a product, with a
@@ -1846,6 +2065,22 @@ def select_entry_signal(product_data: dict) -> dict:
             "features": product_data.get("momentum_runner_features", {}) or {},
             "requires_mtf": False,
         },
+        {
+            "type": "liquidation_cascade",
+            "strategy": "LIQUIDATION_CASCADE_CATCH",
+            "score": float(product_data.get("liquidation_score", 0.0) or 0.0),
+            "threshold": LIQUIDATION_CATCH_MIN_SCORE,
+            "features": product_data.get("liquidation_features", {}) or {},
+            "requires_mtf": False,
+        },
+        {
+            "type": "cvd_divergence",
+            "strategy": "SPOT_CVD_DIVERGENCE",
+            "score": float(product_data.get("cvd_score", 0.0) or 0.0),
+            "threshold": CVD_DIVERGENCE_MIN_SCORE,
+            "features": product_data.get("cvd_features", {}) or {},
+            "requires_mtf": False,
+        },
     ]
     enabled = set(enabled_entry_strategy_names())
     if enabled:
@@ -1895,6 +2130,7 @@ def select_entry_signal(product_data: dict) -> dict:
 
     best["raw_score"]            = raw_score
     best["score"]                = adjusted_score
+    best["effective_threshold"]  = effective_threshold
     best["eligible"]             = adjusted_score >= effective_threshold
     best["consensus_count"]      = consensus_count
     best["consensus_bonus"]      = bonus
@@ -2062,15 +2298,17 @@ def analyze_distribution_phase(candles: list[list]) -> dict:
 
 
 def apply_dynamic_distribution_baseline(analysis: dict, hourly_candles: list[list]) -> dict:
-    """Adapts flow/wick thresholds to the coin's recent seven-day hourly regime."""
+    """Applies rolling 4h distribution z-scores over the configured 14-day regime."""
     if not DISTRIBUTION_DYNAMIC_BASELINE_ENABLED or len(hourly_candles) < 72:
         return analysis
     days = max(3, min(DISTRIBUTION_BASELINE_DAYS, len(hourly_candles) // 24))
     sample = hourly_candles[-days * 24:]
     down_ratios: list[float] = []
     wick_rates: list[float] = []
-    for start in range(0, len(sample), 24):
-        window = sample[start:start + 24]
+    # Compare the current four-hour condition with like-for-like rolling 4h
+    # windows, rather than comparing it with whole-day volume distributions.
+    for start in range(0, max(0, len(sample) - 3)):
+        window = sample[start:start + 4]
         total_volume = sum(float(c[5] or 0.0) for c in window)
         down_volume = sum(float(c[5] or 0.0) for c in window if float(c[4] or 0.0) < float(c[3] or 0.0))
         wick_count = 0
@@ -2105,6 +2343,9 @@ def apply_dynamic_distribution_baseline(analysis: dict, hourly_candles: list[lis
     components.pop("upper_wicks", None)
     down_ratio = float(updated.get("down_volume_ratio_4h", 0.0) or 0.0)
     wick_count = int(updated.get("upper_wick_rejections_4h", 0) or 0)
+    current_wick_rate = wick_count / 48.0
+    down_z = (down_ratio - down_mean) / down_std if down_std > 0 else 0.0
+    wick_z = (current_wick_rate - wick_mean) / wick_std if wick_std > 0 else 0.0
     if down_ratio >= dynamic_down_threshold:
         components["down_volume"] = 20
         reasons.append(f"4h down-volume ratio {down_ratio:.2f} >= dynamic {dynamic_down_threshold:.2f}")
@@ -2112,9 +2353,10 @@ def apply_dynamic_distribution_baseline(analysis: dict, hourly_candles: list[lis
         components["upper_wicks"] = 10
         reasons.append(f"{wick_count} upper-wick rejections >= dynamic {dynamic_wick_count}")
     score = min(100.0, sum(components.values()))
+    dynamic_extreme = down_z >= multiplier or wick_z >= multiplier
     price_4h = float(updated.get("price_change_4h", 0.0) or 0.0)
     obv_4h = float(updated.get("obv_pressure_4h", 0.0) or 0.0)
-    if score >= DISTRIBUTION_SHADOW_BLOCK_SCORE:
+    if dynamic_extreme or score >= DISTRIBUTION_SHADOW_BLOCK_SCORE:
         phase = "DISTRIBUTION"
     elif price_4h > 0 and obv_4h > 0:
         phase = "MARKUP"
@@ -2124,13 +2366,16 @@ def apply_dynamic_distribution_baseline(analysis: dict, hourly_candles: list[lis
         phase = "NEUTRAL"
     updated.update({
         "score": round(score, 1),
-        "would_block": score >= DISTRIBUTION_SHADOW_BLOCK_SCORE,
+        "would_block": dynamic_extreme or score >= DISTRIBUTION_SHADOW_BLOCK_SCORE,
         "phase": phase,
         "reasons": reasons,
         "score_components": components,
         "dynamic_baseline_days": days,
         "dynamic_down_volume_threshold": round(dynamic_down_threshold, 3),
         "dynamic_upper_wick_threshold_4h": dynamic_wick_count,
+        "dynamic_down_volume_z": round(down_z, 3),
+        "dynamic_upper_wick_z": round(wick_z, 3),
+        "dynamic_extreme": dynamic_extreme,
     })
     return updated
 
@@ -2226,6 +2471,25 @@ def structure_filter_result(product_data: dict, signal: dict) -> dict:
     breakout entry. This is intentionally strict only for breakout-style trades.
     """
     strategy = signal.get("strategy", "")
+    if strategy == "LIQUIDATION_CASCADE_CATCH":
+        features = signal.get("features", {}) or {}
+        limit_price = float(features.get("liquidation_limit_price", 0.0) or 0.0)
+        atr = float(features.get("atr", 0.0) or 0.0)
+        if limit_price <= 0 or atr <= 0:
+            return {"ok": False, "reason": "invalid liquidation limit/ATR", "features": features}
+        stop = max(0.00000001, limit_price - atr)
+        stop_pct = (limit_price - stop) / limit_price * 100.0
+        return {
+            "ok": True,
+            "reason": "provider-confirmed liquidation limit",
+            "features": features,
+            "buy_zone_low": limit_price,
+            "buy_zone_high": limit_price,
+            "support_level": limit_price,
+            "support_floor": stop,
+            "stop_loss": stop,
+            "stop_distance_pct": stop_pct,
+        }
     if strategy not in {"CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT"}:
         return {"ok": True, "reason": "structure not required", "features": {}}
 
@@ -2766,11 +3030,11 @@ def _pearson_correlation(left: dict[int, float], right: dict[int, float]) -> tup
     return ((numerator / denominator) if denominator > 0 else 0.0), len(timestamps)
 
 
-def _correlated_loss_cooldown(history: list, product_id: str,
-                              candle_cache: dict[str, list[list]]) -> tuple[bool, str]:
-    """Blocks brief re-risking into a coin highly correlated with a recent loser."""
+def _correlated_loss_penalty(history: list, product_id: str,
+                             candle_cache: dict[str, list[list]]) -> tuple[float, str]:
+    """Returns the score penalty for exposure correlated with a recent loser."""
     if not CORRELATED_COOLDOWN_ENABLED:
-        return False, ""
+        return 0.0, ""
     cutoff = _utcnow_epoch() - int(max(0.0, CORRELATED_COOLDOWN_HOURS) * 3600)
     recent_losers: dict[str, int] = {}
     for trade in history:
@@ -2781,7 +3045,7 @@ def _correlated_loss_cooldown(history: list, product_id: str,
         if perf.get("status") == "CLOSED" and float(perf.get("pnl_usd", 0.0) or 0.0) < 0 and exit_timestamp >= cutoff:
             recent_losers[str(trade.get("product_id") or "")] = exit_timestamp
     if not recent_losers:
-        return False, ""
+        return 0.0, ""
     if product_id not in candle_cache:
         candle_cache[product_id] = fetch_candles(product_id, MTF_GRAN_1H)
     candidate_returns = _return_series(candle_cache.get(product_id, []))
@@ -2790,8 +3054,8 @@ def _correlated_loss_cooldown(history: list, product_id: str,
             candle_cache[loser] = fetch_candles(loser, MTF_GRAN_1H)
         correlation, points = _pearson_correlation(candidate_returns, _return_series(candle_cache.get(loser, [])))
         if points >= CORRELATED_COOLDOWN_MIN_POINTS and correlation >= CORRELATED_COOLDOWN_MIN_CORRELATION:
-            return True, f"{correlation:.2f} correlation with recent loser {loser} ({points} hourly returns)"
-    return False, ""
+            return CORRELATION_SCORE_PENALTY, f"{correlation:.2f} correlation with recent loser {loser} ({points} hourly returns)"
+    return 0.0, ""
 
 
 def _capital_deployed(active_positions: dict) -> float:
@@ -3075,12 +3339,15 @@ def _limit_entry_allowed_for_signal(signal: dict, structure: dict) -> bool:
     strategy = str(signal.get("strategy", "") or "")
     if not LIMIT_ENTRY_ENABLED:
         return False
-    if strategy not in {"CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT"}:
+    if strategy not in {"CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT", "LIQUIDATION_CASCADE_CATCH"}:
         return False
     return bool(structure.get("ok"))
 
 
 def _limit_entry_price(signal: dict, structure: dict, market_price: float) -> float:
+    liquidation_limit = float((signal.get("features", {}) or {}).get("liquidation_limit_price", 0.0) or 0.0)
+    if signal.get("strategy") == "LIQUIDATION_CASCADE_CATCH" and liquidation_limit > 0:
+        return liquidation_limit
     support_level = float(structure.get("support_level", 0.0) or 0.0)
     buy_zone_low = float(structure.get("buy_zone_low", 0.0) or 0.0)
     buy_zone_high = float(structure.get("buy_zone_high", 0.0) or 0.0)
@@ -3173,6 +3440,10 @@ def _open_position_from_entry(
         "wedge_features":         product_data.get("wedge_features", {}),
         "momentum_runner_score":  product_data.get("momentum_runner_score", 0),
         "momentum_runner_features": product_data.get("momentum_runner_features", {}),
+        "liquidation_score":      product_data.get("liquidation_score", 0),
+        "liquidation_features":   product_data.get("liquidation_features", {}),
+        "cvd_score":              product_data.get("cvd_score", 0),
+        "cvd_features":           product_data.get("cvd_features", {}),
         "mtf_scores":             mtf_scores,
         "dollar_volume_24h":      float(product_data.get("dollar_volume_24h", 0.0) or 0.0),
         "breakout_dollar_volume": float(product_data.get("recent_window_dollar_volume", 0.0) or 0.0),
@@ -3187,6 +3458,8 @@ def _open_position_from_entry(
         "entry_sizing_notes":     list(sizing_reasons),
         "entry_distribution_shadow": product_data.get("distribution_shadow", {}),
         "entry_order_book_execution": product_data.get("order_book_execution", {}),
+        "entry_derivatives_metrics": product_data.get("derivatives_metrics", {}),
+        "entry_derivatives_regime_gate": product_data.get("derivatives_regime_gate", {}),
     }
     return {
         "crypto_qty": crypto_qty,
@@ -3301,21 +3574,31 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
         signal = select_entry_signal(prod)
         liquidity = liquidity_filter_result(prod)
         obv = obv_filter_result(prod)
+        derivatives_gate = derivatives_regime_gate(prod)
+        distribution_shadow = prod.get("distribution_shadow", {}) or {}
         structure = structure_filter_result(prod, signal)
 
         reasons: list[str] = []
         if not liquidity["ok"]:
             reasons.append(liquidity["reason"])
-        if not obv["ok"]:
+        if not obv["ok"] and signal.get("strategy") != "LIQUIDATION_CASCADE_CATCH":
             reasons.append(obv["reason"])
         if not structure["ok"]:
             reasons.append(structure["reason"])
+        if signal.get("eligible") and not derivatives_gate["ok"]:
+            reasons.append(derivatives_gate["reason"])
         if not signal["eligible"]:
             reasons.append(
                 f"{signal['strategy']} score {signal['score']:.0f} below buy threshold"
             )
 
-        eligible = signal["eligible"] and liquidity["ok"] and obv["ok"] and structure["ok"]
+        eligible = (
+            signal["eligible"]
+            and liquidity["ok"]
+            and (obv["ok"] or signal.get("strategy") == "LIQUIDATION_CASCADE_CATCH")
+            and structure["ok"]
+            and derivatives_gate["ok"]
+        )
         liquidity_ok = liquidity["ok"]
         structural_stop = float(structure.get("stop_loss", 0.0) or 0.0)
         stop_loss = structural_stop if 0 < structural_stop < price else price * (1 - TRAILING_PERCENT / 100)
@@ -3344,14 +3627,21 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "bollinger_score": round(float(prod.get("bollinger_score", 0.0) or 0.0), 1),
             "wedge_score": round(float(prod.get("wedge_score", 0.0) or 0.0), 1),
             "momentum_runner_score": round(float(prod.get("momentum_runner_score", 0.0) or 0.0), 1),
+            "liquidation_score": round(float(prod.get("liquidation_score", 0.0) or 0.0), 1),
+            "cvd_score": round(float(prod.get("cvd_score", 0.0) or 0.0), 1),
             "price_change_24h": round(float(prod.get("price_change_24h", 0.0) or 0.0), 2),
             "price_change_1h": round(float(prod.get("price_change_1h", 0.0) or 0.0), 2),
             "dollar_volume_24h": round(float(liquidity.get("dollar_volume_24h", 0.0) or 0.0), 2),
             "obv_pressure_pct": round(float(obv.get("metrics", {}).get("obv_pressure_pct", 0.0) or 0.0), 2),
-            "distribution_shadow_score": round(float((prod.get("distribution_shadow", {}) or {}).get("score", 0.0) or 0.0), 1),
-            "distribution_shadow_phase": str((prod.get("distribution_shadow", {}) or {}).get("phase", "UNKNOWN")),
-            "distribution_shadow_would_block": bool((prod.get("distribution_shadow", {}) or {}).get("would_block", False)),
-            "distribution_shadow_reasons": list((prod.get("distribution_shadow", {}) or {}).get("reasons", [])),
+            "funding_gate_ok": bool(derivatives_gate.get("ok", True)),
+            "funding_gate_reason": str(derivatives_gate.get("reason", "")),
+            "derivatives_available": bool((prod.get("derivatives_metrics", {}) or {}).get("available", False)),
+            "oi_change_24h_pct": (prod.get("derivatives_metrics", {}) or {}).get("open_interest_change_24h_pct"),
+            "funding_rate_8h_pct": (prod.get("derivatives_metrics", {}) or {}).get("funding_rate_8h_pct"),
+            "distribution_shadow_score": round(float(distribution_shadow.get("score", 0.0) or 0.0), 1),
+            "distribution_shadow_phase": str(distribution_shadow.get("phase", "UNKNOWN")),
+            "distribution_shadow_would_block": bool(distribution_shadow.get("would_block", False)),
+            "distribution_shadow_reasons": list(distribution_shadow.get("reasons", [])),
             "directional_discovery_score": _directional_watchlist_quality_score(prod),
             "buy_range_low": round(float(structure.get("buy_zone_low", price) or price), 6),
             "buy_range_high": round(float(structure.get("buy_zone_high", price * 1.005) or (price * 1.005)), 6),
@@ -3394,6 +3684,11 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "min_signal_score": MIN_SIGNAL_SCORE,
             "distribution_shadow_enabled": DISTRIBUTION_SHADOW_ENABLED,
             "distribution_shadow_block_score": DISTRIBUTION_SHADOW_BLOCK_SCORE,
+            "distribution_baseline_days": DISTRIBUTION_BASELINE_DAYS,
+            "distribution_sigma_multiplier": DISTRIBUTION_BASELINE_STDDEV_MULTIPLIER,
+            "funding_rate_gate_enabled": FUNDING_RATE_GATE_ENABLED,
+            "max_funding_rate_8h_pct": MAX_FUNDING_RATE_8H_PCT,
+            "institutional_metrics_scan_limit": INSTITUTIONAL_METRICS_SCAN_LIMIT,
         },
         "positions": positions,
         "setups": top,
@@ -3442,6 +3737,9 @@ def manage_pending_entries(client, active_positions: dict, pending_entries: dict
         invalidation_floor = float(order.get("invalidation_floor", 0.0) or 0.0)
         signal_price = float(order.get("signal_price", 0.0) or 0.0)
         buy_zone_high = float(order.get("buy_zone_high", 0.0) or 0.0)
+        entry_style = str(order.get("entry_style", "") or "")
+        signal_strategy = str((order.get("signal", {}) or {}).get("strategy", "") or "")
+        is_liquidation_catch = entry_style == "liquidation_catch_limit" or signal_strategy == "LIQUIDATION_CASCADE_CATCH"
         latest_low = current_price
         try:
             candles = fetch_candles(product_id)
@@ -3450,7 +3748,7 @@ def manage_pending_entries(client, active_positions: dict, pending_entries: dict
         except Exception:
             candles = []
 
-        if invalidation_floor > 0 and latest_low < invalidation_floor:
+        if invalidation_floor > 0 and latest_low < invalidation_floor and not is_liquidation_catch:
             print(
                 f"  [LIMIT CANCEL] {product_id}: support failed "
                 f"(low ${latest_low:,.6g} < ${invalidation_floor:,.6g})."
@@ -3460,7 +3758,7 @@ def manage_pending_entries(client, active_positions: dict, pending_entries: dict
             continue
 
         reversal = detect_bearish_reversal(product_id, candles)
-        if reversal.get("bearish") and (
+        if (not is_liquidation_catch) and reversal.get("bearish") and (
             bool(reversal.get("severe"))
             or int(reversal.get("confirmation_count", 0) or 0) >= max(2, BEARISH_REVERSAL_MIN_CONFIRMATIONS)
         ):
@@ -3512,6 +3810,9 @@ def manage_pending_entries(client, active_positions: dict, pending_entries: dict
         if not isinstance(product_data, dict):
             print(f"  [LIMIT HOLD] {product_id}: product snapshot missing, waiting for next run.")
             continue
+        product_data = dict(product_data)
+        product_data.update(order.get("product_snapshot", {}) or {})
+        product_data["order_book_execution"] = order.get("order_book_execution", {})
 
         fill_price = current_price if current_price <= limit_price else limit_price
         signal = order.get("signal", {}) or {}
@@ -3553,10 +3854,12 @@ def manage_pending_entries(client, active_positions: dict, pending_entries: dict
         changed = True
 
         confidence_label = signal.get("confidence_level", "SINGLE")
+        fill_title = "Liquidation Catch Limit Filled" if is_liquidation_catch else "Pending Limit Filled"
+        zone_label = "Cascade bid" if is_liquidation_catch else "Support"
         msg = (
-            f"🟢 [{'LIVE BUY' if LIVE_ORDERS_ACTIVE else 'PAPER BUY'}] {product_id} — Pending Limit Filled\n"
+            f"🟢 [{'LIVE BUY' if LIVE_ORDERS_ACTIVE else 'PAPER BUY'}] {product_id} — {fill_title}\n"
             f"💵 Fill: ${fill_price:,.6g}  |  Limit: ${limit_price:,.6g}\n"
-            f"📍 Support: ${float(structure.get('support_level', 0.0) or 0.0):,.6g}  |  "
+            f"📍 {zone_label}: ${float(structure.get('support_level', 0.0) or 0.0):,.6g}  |  "
             f"Zone: ${float(structure.get('buy_zone_low', 0.0) or 0.0):,.6g}-${float(structure.get('buy_zone_high', 0.0) or 0.0):,.6g}\n"
             f"🛡️ Stop: ${entry_meta['initial_stop']:,.6g} [{entry_meta['stop_method']}]\n"
             f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%  |  Main TP: ${entry_meta['take_profit_target']:,.6g} (+{entry_meta['main_tp_pct']:.0f}% {entry_meta['main_tp_reason']})\n"
@@ -3639,6 +3942,24 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
             prod.setdefault("wedge_features", {})
             prod.setdefault("wedge_score", 0.0)
 
+    # Institutional metrics are deliberately bounded to the strongest names so
+    # a licensed aggregator is not called for the entire Coinbase universe.
+    institutional_candidates = sorted(
+        products, key=_watchlist_quality_score, reverse=True
+    )[:max(0, INSTITUTIONAL_METRICS_SCAN_LIMIT)]
+    for prod in institutional_candidates:
+        product_id = str(prod.get("product_id") or "")
+        metrics = fetch_institutional_derivatives_metrics(product_id)
+        prod["derivatives_metrics"] = metrics
+        apply_oi_validation_to_momentum(prod)
+        candles = fetch_candles(product_id)
+        liquidation = detect_liquidation_cascade_signal(prod, candles)
+        prod["liquidation_score"] = liquidation["liquidation_score"]
+        prod["liquidation_features"] = liquidation["features"]
+        cvd = detect_cvd_divergence_signal(prod, candles)
+        prod["cvd_score"] = cvd["cvd_score"]
+        prod["cvd_features"] = cvd["features"]
+
     # Prioritise either strong breakout setup or strong base score.
     by_score = sorted(
         products,
@@ -3692,12 +4013,16 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
             print(f"  [LIQ SKIP] {product_id}: {liquidity['reason']}")
             continue
 
+        signal = select_entry_signal(prod)
         obv = obv_filter_result(prod)
-        if not obv["ok"]:
+        if not obv["ok"] and signal.get("strategy") != "LIQUIDATION_CASCADE_CATCH":
             print(f"  [OBV SKIP] {product_id}: {obv['reason']}")
             continue
-
-        signal = select_entry_signal(prod)
+        derivatives_gate = derivatives_regime_gate(prod)
+        prod["derivatives_regime_gate"] = derivatives_gate
+        if signal.get("eligible") and not derivatives_gate["ok"]:
+            print(f"  [FUNDING SKIP] {product_id}: {derivatives_gate['reason']}")
+            continue
         if signal.get("eligible") and DISTRIBUTION_DYNAMIC_BASELINE_ENABLED:
             hourly_candle_cache[product_id] = fetch_candles(product_id, MTF_GRAN_1H)
             prod["distribution_shadow"] = apply_dynamic_distribution_baseline(
@@ -3728,11 +4053,23 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 print(f"  [RS SKIP] {product_id}: 1h {coin_1h:+.2f}% vs BTC {btc_1h:+.2f}% (RS {rel_strength:+.2f}% < {MIN_REL_STRENGTH_VS_BTC:.2f}%)")
                 continue
         if signal["eligible"]:
-            correlated_block, correlated_reason = _correlated_loss_cooldown(
+            if signal.get("strategy") == "LIQUIDATION_CASCADE_CATCH" and (LIVE_ORDERS_ACTIVE or not LIMIT_ENTRY_ENABLED):
+                print(f"  [LIQUIDATION SKIP] {product_id}: strategy is paper-limit-only; market execution forbidden")
+                continue
+            correlation_penalty, correlated_reason = _correlated_loss_penalty(
                 history, product_id, hourly_candle_cache
             )
-            if correlated_block:
-                print(f"  [CORRELATION COOLDOWN] {product_id}: {correlated_reason}")
+            if correlation_penalty > 0:
+                original_score = float(signal.get("score", 0.0) or 0.0)
+                signal["score"] = round(max(0.0, original_score - correlation_penalty), 1)
+                signal["correlation_penalty"] = correlation_penalty
+                signal["correlation_penalty_reason"] = correlated_reason
+                signal["eligible"] = signal["score"] >= float(signal.get("effective_threshold", signal.get("threshold", 100.0)) or 100.0)
+                print(
+                    f"  [CORRELATION PENALTY] {product_id}: -{correlation_penalty:.0f} "
+                    f"({original_score:.0f}→{signal['score']:.0f}) — {correlated_reason}"
+                )
+            if not signal.get("eligible"):
                 continue
             # Multi-timeframe confirmation: the 5m trigger must hold up on 15m/1h
             # and not contradict the 4h trend. Only runs for triggered coins, so
@@ -3757,7 +4094,11 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 sizing_reasons.append(f"runner cap {MOMENTUM_RUNNER_MAX_POSITION_PCT:.0f}%")
             position_size, fragile_reasons = _risk_adjusted_position_size(prod, signal, position_size)
             sizing_reasons.extend(fragile_reasons)
-            position_size, structure_reasons = _structure_risk_position_size(structure, price, position_size)
+            liquidation_limit = 0.0
+            if signal.get("strategy") == "LIQUIDATION_CASCADE_CATCH":
+                liquidation_limit = float((signal.get("features", {}) or {}).get("limit_price", 0.0) or 0.0)
+            risk_reference_price = liquidation_limit if liquidation_limit > 0 else price
+            position_size, structure_reasons = _structure_risk_position_size(structure, risk_reference_price, position_size)
             sizing_reasons.extend(structure_reasons)
             planned_full_size = position_size
             if starter_entry:
@@ -3765,7 +4106,14 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 position_size = round(position_size * starter_fraction, 2)
                 sizing_reasons.append(f"pre-retest starter {starter_fraction * 100:.0f}%")
 
-            order_book = fetch_order_book_execution(product_id, position_size, "buy")
+            if signal.get("strategy") == "LIQUIDATION_CASCADE_CATCH":
+                order_book = {
+                    "available": False,
+                    "ok": True,
+                    "reason": "deferred until paper liquidation limit is touched",
+                }
+            else:
+                order_book = fetch_order_book_execution(product_id, position_size, "buy")
             prod["order_book_execution"] = order_book
             if order_book.get("available"):
                 book_size = float(order_book.get("recommended_quote_size", 0.0) or 0.0)
@@ -3777,6 +4125,12 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                     sizing_reasons.append(
                         f"book cap ${book_size:,.2f} at {float(order_book.get('execution_cost_pct', 0.0) or 0.0):.3f}% cost"
                     )
+                slippage_pct = max(0.0, float(order_book.get("execution_cost_pct", 0.0) or 0.0))
+                slippage_factor = max(0.0, 1.0 - slippage_pct / 100.0)
+                penalized_size = round(position_size * slippage_factor, 2)
+                if penalized_size < position_size:
+                    position_size = penalized_size
+                    sizing_reasons.append(f"slippage penalty factor {slippage_factor:.6f}")
             entry_execution_price = (
                 float(order_book.get("expected_price", 0.0) or 0.0)
                 if order_book.get("available") else price
@@ -3807,12 +4161,13 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 if limit_price <= 0:
                     limit_price = price
                 expiry_dt = datetime.now(timezone.utc) + timedelta(minutes=max(5, LIMIT_ENTRY_EXPIRY_MINUTES))
+                is_liquidation_catch = signal.get("strategy") == "LIQUIDATION_CASCADE_CATCH"
                 pending_entries[product_id] = {
                     "product_id": product_id,
                     "created_at": _utcnow_iso(),
                     "expires_at": expiry_dt.isoformat(),
                     "mode": "paper",
-                    "entry_style": "limit_retest",
+                    "entry_style": "liquidation_catch_limit" if is_liquidation_catch else "limit_retest",
                     "limit_price": float(limit_price),
                     "signal_price": float(price),
                     "allocated_usd": float(position_size),
@@ -3829,6 +4184,18 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                     "product_snapshot": {
                         "price": float(price),
                         "score": float(prod.get("score", 0.0) or 0.0),
+                        "pre_breakout_score": float(prod.get("pre_breakout_score", 0.0) or 0.0),
+                        "orb_score": float(prod.get("orb_score", 0.0) or 0.0),
+                        "bollinger_score": float(prod.get("bollinger_score", 0.0) or 0.0),
+                        "wedge_score": float(prod.get("wedge_score", 0.0) or 0.0),
+                        "momentum_runner_score": float(prod.get("momentum_runner_score", 0.0) or 0.0),
+                        "liquidation_score": float(prod.get("liquidation_score", 0.0) or 0.0),
+                        "liquidation_features": prod.get("liquidation_features", {}),
+                        "cvd_score": float(prod.get("cvd_score", 0.0) or 0.0),
+                        "cvd_features": prod.get("cvd_features", {}),
+                        "distribution_shadow": prod.get("distribution_shadow", {}),
+                        "derivatives_metrics": prod.get("derivatives_metrics", {}),
+                        "derivatives_regime_gate": prod.get("derivatives_regime_gate", {}),
                         "dollar_volume_24h": float(prod.get("dollar_volume_24h", 0.0) or 0.0),
                     },
                 }
@@ -3840,10 +4207,12 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 bonus_str = f" +{bonus:.0f} bonus" if bonus > 0 else ""
                 sizing_note = f"\n   Sizing: {'; '.join(sizing_reasons)}" if sizing_reasons else ""
                 confirming_str = " + ".join(s.replace("_", " ") for s in confirming_strategies)
+                limit_title = "PAPER LIQUIDATION LIMIT" if is_liquidation_catch else "PAPER LIMIT"
+                zone_label = "Cascade bid" if is_liquidation_catch else "Support"
                 msg = (
-                    f"🟦 [PAPER LIMIT] {product_id}\n"
+                    f"🟦 [{limit_title}] {product_id}\n"
                     f"💵 Signal: ${price:,.6g}  |  Limit: ${limit_price:,.6g}  |  Size: ${position_size:,.0f}\n"
-                    f"📍 Support: ${float(structure.get('support_level', 0.0) or 0.0):,.6g}  |  "
+                    f"📍 {zone_label}: ${float(structure.get('support_level', 0.0) or 0.0):,.6g}  |  "
                     f"Zone: ${float(structure.get('buy_zone_low', 0.0) or 0.0):,.6g}-${float(structure.get('buy_zone_high', 0.0) or 0.0):,.6g}\n"
                     f"⏳ Expires: {expiry_dt.strftime('%Y-%m-%d %H:%M UTC')}\n"
                     f"📊 Score: {signal['score']:.0f}/100 [{confidence_label}]  (raw {raw_score:.0f}{bonus_str})\n"
@@ -4019,27 +4388,46 @@ def _early_failure_reason(pos: dict, current_price: float) -> str:
 
 
 def _stagnant_position_reason(pos: dict, current_price: float, candles: list[list]) -> str:
-    """Cuts capital trapped in a tight range with materially declining volume."""
+    """Cuts theta-burn capital after consecutive quiet 15m bars and fading volume."""
     if not STAGNANT_EXIT_ENABLED or pos.get("quick_take_profit_taken") or pos.get("partial_take_profit_taken"):
         return ""
     held = _position_held_minutes(pos)
-    if held < STAGNANT_EXIT_MIN_HOLD_MINUTES or abs(_position_profit_pct(pos, current_price)) > STAGNANT_EXIT_MAX_ABS_PNL_PCT:
+    profit_pct = _position_profit_pct(pos, current_price)
+    if held < STAGNANT_EXIT_MIN_HOLD_MINUTES or profit_pct > EARLY_FAILURE_MAX_PROFIT_PCT:
         return ""
-    required = max(12, STAGNANT_EXIT_MIN_HOLD_MINUTES // 5)
-    if len(candles) < required:
+    candles_15m = aggregate_candles(candles, 3)
+    consecutive = max(4, STAGNANCY_CONSECUTIVE_15M_BARS)
+    if len(candles_15m) < ATR_PERIOD + consecutive + 2:
         return ""
-    window = candles[-required:]
+    window = candles_15m[-consecutive:]
+    baseline = candles_15m[: -consecutive]
+    atr = _atr_value(baseline, ATR_PERIOD)
+    if atr <= 0:
+        return ""
+    quiet_limit = atr * max(0.0, STAGNANCY_ATR_THRESHOLD_FACTOR)
+    quiet_bars = 0
+    for index, candle in enumerate(window):
+        previous_close = float((baseline[-1] if index == 0 else window[index - 1])[4] or 0.0)
+        high = float(candle[2] or 0.0)
+        low = float(candle[1] or 0.0)
+        true_range = max(high - low, abs(high - previous_close), abs(low - previous_close))
+        if true_range <= quiet_limit:
+            quiet_bars += 1
+    if quiet_bars < consecutive:
+        return ""
     highs = [float(c[2] or 0.0) for c in window]
     lows = [float(c[1] or 0.0) for c in window]
     reference = float(pos.get("entry_price", current_price) or current_price)
     range_pct = ((max(highs) - min(lows)) / reference * 100.0) if reference > 0 else 999.0
-    split = max(6, len(window) // 3)
-    recent_volume = sum(float(c[5] or 0.0) for c in window[-split:]) / split
-    prior = window[:-split]
-    prior_volume = sum(float(c[5] or 0.0) for c in prior) / max(1, len(prior))
+    recent_volume = sum(float(c[5] or 0.0) for c in window) / len(window)
+    prior_window = baseline[-consecutive:]
+    prior_volume = sum(float(c[5] or 0.0) for c in prior_window) / max(1, len(prior_window))
     volume_ratio = recent_volume / prior_volume if prior_volume > 0 else 1.0
     if range_pct <= STAGNANT_EXIT_MAX_RANGE_PCT and volume_ratio <= STAGNANT_EXIT_MAX_VOLUME_RATIO:
-        return f"STAGNANT_CAPITAL_{held}M_RANGE_{range_pct:.2f}PCT_VOLUME_{volume_ratio:.2f}X"
+        return (
+            f"STAGNANT_CAPITAL_{held}M_{quiet_bars}X15M_BELOW_"
+            f"{STAGNANCY_ATR_THRESHOLD_FACTOR:.2f}ATR_RANGE_{range_pct:.2f}PCT_VOLUME_{volume_ratio:.2f}X"
+        )
     return ""
 
 
@@ -4067,8 +4455,14 @@ def _entry_review_snapshot(pos: dict) -> dict:
         "entry_bollinger_score": float(pos.get("bollinger_score", 0.0) or 0.0),
         "entry_wedge_score": float(pos.get("wedge_score", 0.0) or 0.0),
         "entry_momentum_runner_score": float(pos.get("momentum_runner_score", 0.0) or 0.0),
+        "entry_liquidation_score": float(pos.get("liquidation_score", 0.0) or 0.0),
+        "entry_liquidation_features": pos.get("liquidation_features", {}),
+        "entry_cvd_score": float(pos.get("cvd_score", 0.0) or 0.0),
+        "entry_cvd_features": pos.get("cvd_features", {}),
         "entry_distribution_shadow": pos.get("entry_distribution_shadow", {}),
         "entry_order_book_execution": pos.get("entry_order_book_execution", {}),
+        "entry_derivatives_metrics": pos.get("entry_derivatives_metrics", {}),
+        "entry_derivatives_regime_gate": pos.get("entry_derivatives_regime_gate", {}),
     }
 
 

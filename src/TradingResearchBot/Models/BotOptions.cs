@@ -38,11 +38,63 @@ public sealed class BotOptions
     /// <summary>Paper-trade sizing used to enrich research alerts with simulated trade plans.</summary>
     public PaperTradingOptions PaperTrading { get; set; } = new();
 
+    /// <summary>Institutional-style research overlays. Safe default is shadow-only.</summary>
+    public InstitutionalOverlayOptions Institutional { get; set; } = new();
+
     public IEnumerable<string> StockSymbols() => Split(StockUniverse);
     public IEnumerable<string> CryptoSymbols() => Split(CryptoUniverse);
 
     private static IEnumerable<string> Split(string csv) =>
         (csv ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+}
+
+/// <summary>
+/// Research-only overlays for sector-relative strength, beta-neutral pair ideas,
+/// and post-earnings announcement drift. ShadowOnly prevents score/gate changes.
+/// </summary>
+public sealed class InstitutionalOverlayOptions
+{
+    public bool Enabled { get; set; } = true;
+    public bool ShadowOnly { get; set; } = true;
+    public int RelativeStrengthLookbackDays { get; set; } = 20;
+    public decimal MinSectorExcessReturnPct { get; set; } = 1.5m;
+    public bool RequireSectorStrengthForBreakouts { get; set; } = true;
+    public int PairLookbackDays { get; set; } = 60;
+    public decimal MinPairCorrelation { get; set; } = 0.70m;
+    public int PeadMaxAgeDays { get; set; } = 30;
+    public decimal MinPeadSurpriseZ { get; set; } = 1.0m;
+
+    /// <summary>Stock ticker to liquid sector/index benchmark.</summary>
+    public Dictionary<string, string> SectorBenchmarks { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["AMD"] = "SMH", ["NVDA"] = "SMH", ["AVGO"] = "SMH", ["AMAT"] = "SMH", ["SMCI"] = "SMH",
+        ["AAPL"] = "XLK", ["MSFT"] = "XLK", ["CRM"] = "XLK", ["PLTR"] = "XLK",
+        ["AMZN"] = "XLY", ["TSLA"] = "XLY", ["GOOGL"] = "XLC", ["META"] = "XLC", ["NFLX"] = "XLC",
+        ["JPM"] = "XLF", ["XOM"] = "XLE", ["BP"] = "XLE", ["COST"] = "XLP", ["COIN"] = "ARKF"
+    };
+
+    /// <summary>Stock ticker to economically similar peer used for shadow hedging.</summary>
+    public Dictionary<string, string> PairPeers { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["AMD"] = "NVDA", ["NVDA"] = "AMD", ["AVGO"] = "QCOM", ["AMAT"] = "LRCX",
+        ["AAPL"] = "MSFT", ["MSFT"] = "AAPL", ["GOOGL"] = "META", ["META"] = "GOOGL",
+        ["AMZN"] = "WMT", ["TSLA"] = "GM", ["JPM"] = "BAC", ["XOM"] = "CVX", ["BP"] = "XOM",
+        ["COST"] = "WMT", ["CRM"] = "NOW", ["NFLX"] = "DIS", ["COIN"] = "HOOD"
+    };
+
+    /// <summary>
+    /// Licensed/provider-supplied EPS events. At least four prior surprises are
+    /// required before a z-score is considered statistically usable.
+    /// </summary>
+    public List<EarningsEventOptions> EarningsEvents { get; set; } = new();
+}
+
+public sealed class EarningsEventOptions
+{
+    public string Symbol { get; set; } = "";
+    public DateTimeOffset ReportedAtUtc { get; set; }
+    public decimal ActualEps { get; set; }
+    public decimal EstimateEps { get; set; }
 }
 
 /// <summary>Settings for the combined 200-day SMA screener.</summary>
@@ -246,6 +298,24 @@ public sealed class PaperTradingOptions
     /// <summary>Maximum simultaneous paper positions used for alert budget context.</summary>
     public int MaxOpenPositions { get; set; } = 10;
 
+    /// <summary>
+    /// Explicit arming switch for Alpaca paper orders. Disabled by default; this
+    /// code refuses any host other than paper-api.alpaca.markets.
+    /// </summary>
+    public bool SubmitToAlpaca { get; set; } = false;
+
+    /// <summary>Minimum final research score required for an automated paper entry.</summary>
+    public double MinCandidateScore { get; set; } = 70;
+
+    /// <summary>Maximum new automated stock entries submitted per UTC trading day.</summary>
+    public int MaxNewPositionsPerDay { get; set; } = 2;
+
+    /// <summary>Maximum fraction of paper account equity exposed across open positions.</summary>
+    public decimal MaxAccountExposurePct { get; set; } = 25m;
+
+    /// <summary>Maximum account-equity risk to the structural stop for one entry.</summary>
+    public decimal RiskPerTradePct { get; set; } = 0.5m;
+
     public decimal TotalCapitalUsd => CapitalPerTradeUsd * Math.Max(MaxOpenPositions, 0);
 }
 
@@ -303,6 +373,12 @@ public sealed class AlpacaOptions
 
     /// <summary>Market data base URL (not the trading API base).</summary>
     public string BaseUrl { get; set; } = "https://data.alpaca.markets";
+
+    /// <summary>
+    /// Paper brokerage endpoint. The broker implementation validates this exact
+    /// Alpaca paper host and will refuse a live trading URL.
+    /// </summary>
+    public string PaperTradingBaseUrl { get; set; } = "https://paper-api.alpaca.markets";
 
     /// <summary>Equity data feed: "iex" (free, real-time) or "sip" (paid, full market).</summary>
     public string Feed { get; set; } = "iex";

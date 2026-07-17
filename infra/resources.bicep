@@ -143,6 +143,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'Bot__Providers__Alpaca__ApiKeyId', value: alpacaKeyId }
         { name: 'Bot__Providers__Alpaca__ApiSecret', value: alpacaSecret }
         { name: 'Bot__Providers__Alpaca__Feed', value: 'iex' }
+        { name: 'Bot__Providers__Alpaca__PaperTradingBaseUrl', value: 'https://paper-api.alpaca.markets' }
         { name: 'Bot__TimeZone', value: 'Eastern Standard Time' }
         { name: 'Bot__MarketOpenLocal', value: '08:30' }
         { name: 'Bot__MarketCloseLocal', value: '15:00' }
@@ -169,6 +170,24 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'Bot__Strategy__Crypto__MinVolumeRatio', value: '2.0' }
         { name: 'Bot__Strategy__Crypto__MinAdx', value: '20' }
         { name: 'Bot__Strategy__Crypto__RequireAbove200Sma', value: 'true' }
+
+        // --- Institutional stock overlays (observation-only during shadow phase) ---
+        { name: 'Bot__Institutional__Enabled', value: 'true' }
+        { name: 'Bot__Institutional__ShadowOnly', value: 'true' }
+        { name: 'Bot__Institutional__RelativeStrengthLookbackDays', value: '20' }
+        { name: 'Bot__Institutional__MinSectorExcessReturnPct', value: '1.5' }
+        { name: 'Bot__Institutional__PairLookbackDays', value: '60' }
+        { name: 'Bot__Institutional__MinPairCorrelation', value: '0.70' }
+
+        // --- Alpaca stock paper orders; explicitly disarmed until paper keys are verified ---
+        { name: 'Bot__PaperTrading__Enabled', value: 'true' }
+        { name: 'Bot__PaperTrading__SubmitToAlpaca', value: 'false' }
+        { name: 'Bot__PaperTrading__CapitalPerTradeUsd', value: '1000' }
+        { name: 'Bot__PaperTrading__MaxOpenPositions', value: '10' }
+        { name: 'Bot__PaperTrading__MaxNewPositionsPerDay', value: '2' }
+        { name: 'Bot__PaperTrading__MinCandidateScore', value: '70' }
+        { name: 'Bot__PaperTrading__MaxAccountExposurePct', value: '25' }
+        { name: 'Bot__PaperTrading__RiskPerTradePct', value: '0.5' }
 
         // --- Crypto scalp strategy (15-minute + 4-hour, VWAP/MACD, 10-20% targets) ---
         { name: 'Bot__Scalp__Enabled', value: 'true' }

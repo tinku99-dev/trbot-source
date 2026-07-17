@@ -39,6 +39,12 @@ public sealed class Candidate
     /// <summary>Optional simulated paper-trade plan for research alerts.</summary>
     public PaperTradePlan? PaperTrade { get; set; }
 
+    /// <summary>Shadow-only institutional research measurements and hedge ideas.</summary>
+    public InstitutionalOverlayResult? Institutional { get; set; }
+
+    /// <summary>Outcome of an optional Alpaca paper-order submission.</summary>
+    public AlpacaPaperOrderResult? AlpacaPaperOrder { get; set; }
+
     /// <summary>0-100 composite conviction from the indicator battery.</summary>
     public decimal Conviction => Indicators.ConvictionScore ?? 0;
 
@@ -63,6 +69,38 @@ public sealed class Candidate
     /// </summary>
     public bool StrategyQualified { get; set; } = true;
 }
+
+/// <summary>
+/// Measurements produced by institutional-style overlays. These are observations,
+/// not orders; <see cref="ShadowOnly"/> is true under the safe default configuration.
+/// </summary>
+public sealed class InstitutionalOverlayResult
+{
+    public bool ShadowOnly { get; init; } = true;
+    public string? SectorBenchmark { get; set; }
+    public decimal? AssetReturnPct { get; set; }
+    public decimal? BenchmarkReturnPct { get; set; }
+    public decimal? SectorExcessReturnPct { get; set; }
+    public bool? RelativeStrengthQualified { get; set; }
+    public string? HedgePeer { get; set; }
+    public decimal? PairCorrelation { get; set; }
+    public decimal? HedgeBeta { get; set; }
+    public decimal? ShortNotionalPctOfLong { get; set; }
+    public DateTimeOffset? EarningsReportedAtUtc { get; set; }
+    public decimal? EarningsSurprisePct { get; set; }
+    public decimal? EarningsSurpriseZ { get; set; }
+    public bool? PeadQualified { get; set; }
+}
+
+public sealed record AlpacaPaperOrderResult(
+    string Status,
+    string? OrderId,
+    string? ClientOrderId,
+    decimal Quantity,
+    decimal EstimatedNotionalUsd,
+    decimal StopPrice,
+    decimal TakeProfitPrice,
+    string? Message);
 
 public sealed record PaperTradePlan(
     decimal AllocationUsd,

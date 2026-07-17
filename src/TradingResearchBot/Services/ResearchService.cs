@@ -27,6 +27,8 @@ public sealed class ResearchService
     private readonly MarketHoursGuard _clock;
     private readonly IOptionsDataProvider _options;
     private readonly IOptionsStrategist _optionsStrategist;
+    private readonly InstitutionalOverlayService _institutional;
+    private readonly AlpacaPaperTradingService _paperTrading;
     private readonly BotOptions _optionsConfig;
     private readonly ILogger<ResearchService> _logger;
 
@@ -42,6 +44,8 @@ public sealed class ResearchService
         MarketHoursGuard clock,
         IOptionsDataProvider options,
         IOptionsStrategist optionsStrategist,
+        InstitutionalOverlayService institutional,
+        AlpacaPaperTradingService paperTrading,
         IOptions<BotOptions> botOptions,
         ILogger<ResearchService> logger)
     {
@@ -56,6 +60,8 @@ public sealed class ResearchService
         _clock = clock;
         _options = options;
         _optionsStrategist = optionsStrategist;
+        _institutional = institutional;
+        _paperTrading = paperTrading;
         _optionsConfig = botOptions.Value;
         _logger = logger;
     }
@@ -116,6 +122,11 @@ public sealed class ResearchService
         var report = await EvaluateAsync(universe, ct);
         _logger.LogInformation("Report built with {Count} candidates.", report.Candidates.Count);
 
+        // Automated brokerage integration is deliberately limited to intraday runs
+        // and the Alpaca paper endpoint. Preview/digest runs never submit orders.
+        if (kind == RunKind.Intraday)
+            await _paperTrading.PrepareAndSubmitAsync(report.Candidates, ct);
+
         await _store.SaveAsync(report, ct);
         await DispatchAsync(report, kind, ct);
 
@@ -129,6 +140,7 @@ public sealed class ResearchService
     private async Task<ResearchReport> EvaluateAsync(IReadOnlyList<UniverseEntry> universe, CancellationToken ct)
     {
         var candidates = new List<Candidate>(universe.Count);
+        var histories = new Dictionary<string, PriceHistory>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (symbol, assetClass) in universe)
         {
@@ -145,6 +157,7 @@ public sealed class ResearchService
                 var ind = _indicators.Compute(history);
                 var candidate = _scoring.Evaluate(history, ind);
                 candidates.Add(candidate);
+                histories[symbol] = history;
             }
             catch (Exception ex)
             {
@@ -152,6 +165,7 @@ public sealed class ResearchService
             }
         }
 
+        await _institutional.ApplyAsync(candidates, histories, ct);
         var report = _reportBuilder.Build(candidates, _optionsConfig.MaxCandidates);
 
         if (_optionsConfig.Options.Enabled)

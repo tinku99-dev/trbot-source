@@ -59,6 +59,17 @@ public sealed class ReportBuilder : IReportBuilder
             sb.AppendLine($"     Buy range  : {Fmt(c.BuyRangeLow)} - {Fmt(c.BuyRangeHigh)}");
             sb.AppendLine($"     Stop loss  : {Fmt(c.StopLoss)}");
             sb.AppendLine($"     Targets    : T1 {Fmt(c.Target1)}  |  T2 {Fmt(c.Target2)}");
+            if (c.Institutional is { } inst)
+            {
+                if (inst.SectorBenchmark is not null)
+                    sb.AppendLine($"     Sector RS  : vs {inst.SectorBenchmark}, excess {FmtSigned(inst.SectorExcessReturnPct)}%, pass={inst.RelativeStrengthQualified}");
+                if (inst.HedgePeer is not null)
+                    sb.AppendLine($"     Pair shadow: short {inst.HedgePeer} at {Fmt(inst.ShortNotionalPctOfLong)}% of long; corr {Fmt(inst.PairCorrelation)}, beta {Fmt(inst.HedgeBeta)}");
+                if (inst.EarningsSurpriseZ is not null)
+                    sb.AppendLine($"     PEAD shadow: surprise {FmtSigned(inst.EarningsSurprisePct)}%, z {Fmt(inst.EarningsSurpriseZ)}, pass={inst.PeadQualified}");
+            }
+            if (c.AlpacaPaperOrder is { } order)
+                sb.AppendLine($"     Alpaca paper: {order.Status}; qty {order.Quantity:F0}; id {order.OrderId ?? "—"}; {order.Message ?? "protected bracket submitted"}");
             if (c.OptionIdea is { } opt)
             {
                 sb.AppendLine($"     Option idea: {opt.Describe()}");
@@ -76,4 +87,5 @@ public sealed class ReportBuilder : IReportBuilder
     }
 
     private static string Fmt(decimal? v) => v.HasValue ? v.Value.ToString("F2") : "n/a";
+    private static string FmtSigned(decimal? v) => v.HasValue ? v.Value.ToString("+0.00;-0.00;0.00") : "n/a";
 }

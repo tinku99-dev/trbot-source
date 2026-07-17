@@ -38,6 +38,8 @@ var host = new HostBuilder()
         services.AddSingleton<IReportStore, FileReportStore>();
         services.AddSingleton<IAlertStateStore, BlobAlertStateStore>();
         services.AddSingleton<MarketHoursGuard>();
+        services.AddScoped<InstitutionalOverlayService>();
+        services.AddHttpClient<AlpacaPaperTradingService>();
         services.AddScoped<ResearchService>();
 
         // --- Market data provider (selectable via Bot:MarketProvider) ---
