@@ -17,6 +17,13 @@ param alpacaSecret string = ''
 
 param marketProvider string = 'Alpaca'
 
+param optionsProvider string = 'Tradier'
+
+@secure()
+param tradierApiKey string = ''
+
+param tradierBaseUrl string = 'https://api.tradier.com'
+
 param emailUsername string
 
 @secure()
@@ -144,6 +151,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'Bot__Providers__Alpaca__ApiSecret', value: alpacaSecret }
         { name: 'Bot__Providers__Alpaca__Feed', value: 'iex' }
         { name: 'Bot__Providers__Alpaca__PaperTradingBaseUrl', value: 'https://paper-api.alpaca.markets' }
+        { name: 'Bot__Providers__Tradier__ApiKey', value: tradierApiKey }
+        { name: 'Bot__Providers__Tradier__BaseUrl', value: tradierBaseUrl }
         { name: 'Bot__TimeZone', value: 'Eastern Standard Time' }
         { name: 'Bot__MarketOpenLocal', value: '08:30' }
         { name: 'Bot__MarketCloseLocal', value: '15:00' }
@@ -210,13 +219,23 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'Bot__Scalp__MinHigherAdx', value: '20' }
 
         { name: 'Bot__Options__Enabled', value: 'true' }
-        { name: 'Bot__Options__Provider', value: 'Mock' }
+        { name: 'Bot__Options__Provider', value: optionsProvider }
+        { name: 'Bot__Options__MinDaysToExpiration', value: '10' }
+        { name: 'Bot__Options__MaxDaysToExpiration', value: '45' }
+        { name: 'Bot__Options__MinOpenInterest', value: '300' }
+        { name: 'Bot__Options__MinVolume', value: '50' }
+        { name: 'Bot__Options__MaxBidAskSpreadPct', value: '12.0' }
+        { name: 'Bot__Options__TargetDelta', value: '0.40' }
+        { name: 'Bot__Options__ScalpTargetDelta', value: '0.55' }
 
         // --- Notifications: Discord intraday alerts + daily email digest ---
         { name: 'Bot__Notifications__Provider', value: 'Email' }
         { name: 'Bot__Notifications__IntradayChannel', value: 'Discord' }
         { name: 'Bot__Notifications__DailyChannel', value: 'Email' }
         { name: 'Bot__Notifications__SuppressEmpty', value: 'true' }
+        { name: 'Bot__Notifications__MinIntradayScore', value: '75' }
+        { name: 'Bot__Notifications__MaxIntradayAlerts', value: '3' }
+        { name: 'Bot__Notifications__RequireOptionIdeaForStockAlerts', value: 'true' }
         { name: 'Bot__Notifications__Discord__WebhookUrl', value: discordWebhookUrl }
         { name: 'Bot__Notifications__Email__SmtpHost', value: 'smtp.gmail.com' }
         { name: 'Bot__Notifications__Email__SmtpPort', value: '587' }

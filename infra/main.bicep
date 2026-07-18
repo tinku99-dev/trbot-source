@@ -23,6 +23,16 @@ param alpacaSecret string = ''
 @description('Market data provider: Alpaca | Polygon | Mock.')
 param marketProvider string = 'Alpaca'
 
+@description('Options data provider: Tradier | Mock | LicensedHttp.')
+param optionsProvider string = 'Tradier'
+
+@description('Tradier API token for real options chains.')
+@secure()
+param tradierApiKey string = ''
+
+@description('Tradier base URL: https://api.tradier.com for live or https://sandbox.tradier.com for sandbox.')
+param tradierBaseUrl string = 'https://api.tradier.com'
+
 @description('Gmail SMTP username / sender address (used for both From and auth).')
 param emailUsername string
 
@@ -60,6 +70,9 @@ module resources 'resources.bicep' = {
     alpacaKeyId: alpacaKeyId
     alpacaSecret: alpacaSecret
     marketProvider: marketProvider
+    optionsProvider: optionsProvider
+    tradierApiKey: tradierApiKey
+    tradierBaseUrl: tradierBaseUrl
     emailUsername: emailUsername
     emailPassword: emailPassword
     emailTo: emailTo

@@ -27,6 +27,7 @@ public sealed class BotOptions
 
     public Sma200Options Sma200 { get; set; } = new();
     public OptionsResearchOptions Options { get; set; } = new();
+    public AiOptionsResearchOptions AiOptions { get; set; } = new();
     public ProviderOptions Providers { get; set; } = new();
     public NotificationOptions Notifications { get; set; } = new();
     public StrategyOptions Strategy { get; set; } = new();
@@ -325,6 +326,30 @@ public sealed class OptionsResearchOptions
     public bool Enabled { get; set; } = true;
     /// <summary>Provider key: Mock | Tradier | LicensedHttp.</summary>
     public string Provider { get; set; } = "Mock";
+
+    /// <summary>Expiration window used for options research ideas.</summary>
+    public int MinDaysToExpiration { get; set; } = 10;
+    public int MaxDaysToExpiration { get; set; } = 45;
+
+    /// <summary>Liquidity gates for contracts. These keep the bot away from wide, stale chains.</summary>
+    public long MinOpenInterest { get; set; } = 300;
+    public long MinVolume { get; set; } = 50;
+    public decimal MaxBidAskSpreadPct { get; set; } = 12m;
+
+    /// <summary>Directional delta targets. Scalp ideas can use a stronger, nearer-the-money contract.</summary>
+    public decimal TargetDelta { get; set; } = 0.40m;
+    public decimal ScalpTargetDelta { get; set; } = 0.55m;
+}
+
+/// <summary>Optional AI grading for real options ideas. The model must not invent prices.</summary>
+public sealed class AiOptionsResearchOptions
+{
+    public bool Enabled { get; set; } = false;
+    public string Provider { get; set; } = "None";
+    public string Model { get; set; } = "gemini-2.5-flash-lite";
+    public string ApiKey { get; set; } = "";
+    public string BaseUrl { get; set; } = "https://generativelanguage.googleapis.com";
+    public int MinScoreToAskAi { get; set; } = 70;
 }
 
 /// <summary>API credentials/endpoints for licensed data providers (keep keys in secrets).</summary>
@@ -403,6 +428,15 @@ public sealed class NotificationOptions
 
     /// <summary>When true, an intraday run with no NEW qualified names sends nothing.</summary>
     public bool SuppressEmpty { get; set; } = true;
+
+    /// <summary>Minimum candidate score required for intraday alerts. Manual research still shows the full report.</summary>
+    public double MinIntradayScore { get; set; } = 75;
+
+    /// <summary>Maximum fresh candidates to send in one intraday notification.</summary>
+    public int MaxIntradayAlerts { get; set; } = 3;
+
+    /// <summary>When true, stock intraday alerts require a concrete options idea.</summary>
+    public bool RequireOptionIdeaForStockAlerts { get; set; } = true;
 
     public DiscordOptions Discord { get; set; } = new();
     public EmailOptions Email { get; set; } = new();

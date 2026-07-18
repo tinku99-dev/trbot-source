@@ -2,6 +2,8 @@ using System.Net;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using TradingResearchBot.Abstractions;
 using TradingResearchBot.Models;
 using TradingResearchBot.Services;
 
@@ -15,11 +17,19 @@ namespace TradingResearchBot.Functions;
 public sealed class RunNowHttpFunction
 {
     private readonly ResearchService _research;
+    private readonly IMarketDataProvider _market;
+    private readonly BotOptions _options;
     private readonly ILogger<RunNowHttpFunction> _logger;
 
-    public RunNowHttpFunction(ResearchService research, ILogger<RunNowHttpFunction> logger)
+    public RunNowHttpFunction(
+        ResearchService research,
+        IMarketDataProvider market,
+        IOptions<BotOptions> options,
+        ILogger<RunNowHttpFunction> logger)
     {
         _research = research;
+        _market = market;
+        _options = options.Value;
         _logger = logger;
     }
 
@@ -36,6 +46,9 @@ public sealed class RunNowHttpFunction
         {
             generatedAtUtc = report.GeneratedAtUtc,
             strategy = report.StrategyMode,
+            provider = _market.Name,
+            universeMode = _options.Universe.Mode,
+            optionsProvider = _options.Options.Enabled ? _options.Options.Provider : "Disabled",
             count = report.Candidates.Count,
             disclaimer = report.Disclaimer,
             candidates = report.Candidates.Select(c => new
@@ -52,7 +65,9 @@ public sealed class RunNowHttpFunction
                 c.StopLoss,
                 c.Target1,
                 c.Target2,
+                signals = c.Signals.Distinct(),
                 option = c.OptionIdea is null ? null : c.OptionIdea.Describe(),
+                optionAi = c.OptionIdea?.AiGrade,
                 patterns = c.Patterns.Distinct(),
                 institutional = c.Institutional,
                 alpacaPaperOrder = c.AlpacaPaperOrder

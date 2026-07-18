@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using TradingResearchBot.Abstractions;
 using TradingResearchBot.Models;
 
@@ -11,9 +12,14 @@ namespace TradingResearchBot.Scoring;
 /// </summary>
 public sealed class OptionsStrategist : IOptionsStrategist
 {
+    private readonly OptionsResearchOptions _options;
     private readonly ILogger<OptionsStrategist> _logger;
 
-    public OptionsStrategist(ILogger<OptionsStrategist> logger) => _logger = logger;
+    public OptionsStrategist(IOptions<BotOptions> options, ILogger<OptionsStrategist> logger)
+    {
+        _options = options.Value.Options;
+        _logger = logger;
+    }
 
     public OptionSuggestion? Suggest(Candidate candidate, OptionsChain chain)
     {
@@ -23,11 +29,17 @@ public sealed class OptionsStrategist : IOptionsStrategist
                        && !candidate.Categories.Contains(ReportCategory.Breakout);
         var type = bearish ? OptionType.Put : OptionType.Call;
 
-        decimal targetDelta = candidate.Categories.Contains(ReportCategory.Scalp) ? 0.55m : 0.40m;
+        decimal targetDelta = candidate.Categories.Contains(ReportCategory.Scalp)
+            ? _options.ScalpTargetDelta
+            : _options.TargetDelta;
 
         var liquid = chain.Contracts
-            .Where(c => c.Type == type && c.OpenInterest >= 100 && c.Mid is > 0)
-            .Where(c => c.DaysToExpiration >= 5)
+            .Where(c => c.Type == type && c.OpenInterest >= _options.MinOpenInterest)
+            .Where(c => c.Volume >= _options.MinVolume)
+            .Where(c => c.Mid is > 0)
+            .Where(c => c.DaysToExpiration >= _options.MinDaysToExpiration &&
+                        c.DaysToExpiration <= _options.MaxDaysToExpiration)
+            .Where(c => BidAskSpreadPct(c) <= _options.MaxBidAskSpreadPct)
             .ToList();
 
         if (liquid.Count == 0)
@@ -36,15 +48,17 @@ public sealed class OptionsStrategist : IOptionsStrategist
             return null;
         }
 
-        // Prefer the contract whose |delta| is closest to target, tie-break on OI.
+        // Prefer liquid, tighter-spread contracts near the target delta.
         var best = liquid
-            .OrderBy(c => Math.Abs(Math.Abs(c.Delta ?? 0.5m) - targetDelta))
+            .OrderBy(c => BidAskSpreadPct(c))
+            .ThenBy(c => Math.Abs(Math.Abs(c.Delta ?? targetDelta) - targetDelta))
+            .ThenByDescending(c => c.Volume)
             .ThenByDescending(c => c.OpenInterest)
             .First();
 
         string rationale = bearish
-            ? $"Bearish setup → {type} near {targetDelta:F2} delta for defined-risk downside research."
-            : $"Bullish conviction {candidate.Conviction:F0}/100 → {type} near {targetDelta:F2} delta.";
+            ? $"Bearish setup -> {type} near {targetDelta:F2} delta; liquidity and spread gates passed."
+            : $"Bullish conviction {candidate.Conviction:F0}/100 -> {type} near {targetDelta:F2} delta; liquidity and spread gates passed.";
 
         return new OptionSuggestion
         {
@@ -58,5 +72,14 @@ public sealed class OptionsStrategist : IOptionsStrategist
             OpenInterest = best.OpenInterest,
             Rationale = rationale
         };
+    }
+
+    private static decimal BidAskSpreadPct(OptionContract c)
+    {
+        if (c.Bid is not { } bid || c.Ask is not { } ask || bid <= 0 || ask <= 0 || ask < bid)
+            return decimal.MaxValue;
+
+        var mid = (bid + ask) / 2m;
+        return mid <= 0 ? decimal.MaxValue : (ask - bid) / mid * 100m;
     }
 }

@@ -85,6 +85,13 @@ var host = new HostBuilder()
         else
             services.AddSingleton<IOptionsDataProvider, MockOptionsDataProvider>();
 
+        // --- Optional AI options research layer (grades real option ideas; never sources quotes) ---
+        var aiOptionsProvider = configuration[$"{BotOptions.SectionName}:AiOptions:Provider"] ?? "None";
+        if (string.Equals(aiOptionsProvider, "Gemini", StringComparison.OrdinalIgnoreCase))
+            services.AddHttpClient<IAiOptionsAdvisor, GeminiOptionsAdvisor>();
+        else
+            services.AddSingleton<IAiOptionsAdvisor, NullAiOptionsAdvisor>();
+
         // --- Notifications (selectable via Bot:Notifications:Provider) ---
         RegisterNotifications(services, configuration);
     })

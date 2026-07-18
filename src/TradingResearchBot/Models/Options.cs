@@ -44,10 +44,23 @@ public sealed class OptionSuggestion
     public decimal? Delta { get; init; }
     public long OpenInterest { get; init; }
     public string Rationale { get; init; } = "";
+    public AiOptionGrade? AiGrade { get; set; }
 
     public string Describe() =>
         $"{Type} {Strike:F2} exp {Expiration:yyyy-MM-dd} ({DaysToExpiration}d)" +
         (EntryMid is { } m ? $" @ ~{m:F2}" : "") +
         (Delta is { } d ? $", Δ{d:F2}" : "") +
         (ImpliedVolatility is { } iv ? $", IV {iv * 100:F0}%" : "");
+}
+
+/// <summary>Structured AI research note for a selected options contract.</summary>
+public sealed class AiOptionGrade
+{
+    public int LottoScore { get; init; }
+    public string Strategy { get; init; } = "";
+    public string Thesis { get; init; } = "";
+    public string EntryPlan { get; init; } = "";
+    public string ExitPlan { get; init; } = "";
+    public string RiskWarning { get; init; } = "";
+    public string Action { get; init; } = "watch";
 }

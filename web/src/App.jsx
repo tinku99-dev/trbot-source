@@ -937,6 +937,11 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
   const optionRows = rows
     .map((row) => ({ row, option: pick(row, 'option', 'Option') }))
     .filter((item) => item.option)
+  const provider = pick(report, 'provider', 'Provider')
+  const universeMode = pick(report, 'universeMode', 'UniverseMode')
+  const optionsProvider = pick(report, 'optionsProvider', 'OptionsProvider')
+  const staticOrMock = String(provider || '').toLowerCase() === 'mock'
+    || String(universeMode || '').toLowerCase() === 'static'
 
   return (
     <section className="tool-page">
@@ -953,9 +958,18 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
         <>
           <section className="scoreboard report-metrics">
             <Metric label="Strategy" value={report.strategy || 'Research'} />
+            {provider && <Metric label="Provider" value={provider} />}
+            {universeMode && <Metric label="Universe" value={universeMode} />}
+            {optionsProvider && <Metric label="Options" value={optionsProvider} />}
             <Metric label="Count" value={report.count ?? rows.length} />
             <Metric label="Generated" value={formatDateTime(report.generatedAtUtc)} />
           </section>
+
+          {staticOrMock && (
+            <div className="alert compact">
+              Research is using {provider || 'the configured provider'} data with a {universeMode || 'configured'} universe. Use Alpaca/Polygon market data, Dynamic universe mode, and Tradier/licensed options data for fresher options candidates.
+            </div>
+          )}
 
           {movers.length > 0 && (
             <Panel title="Screened Movers" meta={`${movers.length} movers`}>
@@ -992,6 +1006,7 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
                   {optionRows.map(({ row, option }, index) => {
                     const symbol = pick(row, 'symbol', 'Symbol') || '—'
                     const score = pick(row, 'score', 'Score')
+                    const optionAi = pick(row, 'optionAi', 'OptionAi')
                     const buyLow = pick(row, 'buyRangeLow', 'BuyRangeLow')
                     const buyHigh = pick(row, 'buyRangeHigh', 'BuyRangeHigh')
                     const target1 = pick(row, 'target1', 'Target1')
@@ -1003,6 +1018,11 @@ function RunReport({ apiKey, functionUrl, onOpenSettings, endpoint, title, descr
                           <span>Score {formatNumber(score, 1)}</span>
                         </div>
                         <p>{option}</p>
+                        {optionAi && (
+                          <p>
+                            Gemini lotto score {pick(optionAi, 'lottoScore', 'LottoScore')}/100: {pick(optionAi, 'thesis', 'Thesis')}
+                          </p>
+                        )}
                         <small>Buy range {formatPrice(buyLow)} - {formatPrice(buyHigh)} | Targets {formatPrice(target1)} / {formatPrice(target2)}</small>
                       </article>
                     )

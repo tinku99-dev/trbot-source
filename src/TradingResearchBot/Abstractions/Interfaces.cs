@@ -80,6 +80,12 @@ public interface IOptionsStrategist
     OptionSuggestion? Suggest(Candidate candidate, OptionsChain chain);
 }
 
+/// <summary>Optional AI layer that grades an already-selected real options contract.</summary>
+public interface IAiOptionsAdvisor
+{
+    Task EnrichAsync(Candidate candidate, CancellationToken ct = default);
+}
+
 /// <summary>Scores and categorizes a symbol into research candidates.</summary>
 public interface IScoringEngine
 {

@@ -129,7 +129,7 @@ public class OptionsTests
         var optionsProvider = new MockOptionsDataProvider();
         var engine = new IndicatorEngine();
         var scoring = BuildScoring();
-        var strategist = new OptionsStrategist(NullLogger<OptionsStrategist>.Instance);
+        var strategist = new OptionsStrategist(Options.Create(new BotOptions()), NullLogger<OptionsStrategist>.Instance);
 
         var history = await marketProvider.GetDailyHistoryAsync("MSFT", AssetClass.Stock, 260);
         var ind = engine.Compute(history!);
@@ -140,7 +140,38 @@ public class OptionsTests
 
         Assert.NotNull(suggestion);
         Assert.True(suggestion!.Strike > 0);
-        Assert.True(suggestion.DaysToExpiration >= 5);
+        Assert.True(suggestion.DaysToExpiration >= 10);
         Assert.False(string.IsNullOrWhiteSpace(suggestion.Describe()));
+    }
+
+    [Fact]
+    public void Strategist_PrefersTightLiquidContract()
+    {
+        var strategist = new OptionsStrategist(Options.Create(new BotOptions()), NullLogger<OptionsStrategist>.Instance);
+        var candidate = new Candidate
+        {
+            Symbol = "AAPL",
+            AssetClass = AssetClass.Stock,
+            Indicators = new IndicatorSet { Price = 100m, ConvictionScore = 80m },
+            Score = 80
+        };
+        candidate.Categories.Add(ReportCategory.Breakout);
+
+        var expiration = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(21);
+        var chain = new OptionsChain
+        {
+            Symbol = "AAPL",
+            UnderlyingPrice = 100m,
+            Contracts = new[]
+            {
+                new OptionContract("AAPL", OptionType.Call, 105m, expiration, 1.00m, 1.50m, 1.25m, 5000, 1000, 0.40m, 0.40m),
+                new OptionContract("AAPL", OptionType.Call, 110m, expiration, 1.00m, 1.06m, 1.03m, 700, 200, 0.36m, 0.36m)
+            }
+        };
+
+        var suggestion = strategist.Suggest(candidate, chain);
+
+        Assert.NotNull(suggestion);
+        Assert.Equal(110m, suggestion!.Strike);
     }
 }

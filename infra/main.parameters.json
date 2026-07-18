@@ -20,6 +20,15 @@
     "marketProvider": {
       "value": "${BOT_MARKET_PROVIDER=Alpaca}"
     },
+    "optionsProvider": {
+      "value": "${BOT_OPTIONS_PROVIDER=Tradier}"
+    },
+    "tradierApiKey": {
+      "value": "${TRADIER_API_KEY}"
+    },
+    "tradierBaseUrl": {
+      "value": "${TRADIER_BASE_URL=https://api.tradier.com}"
+    },
     "emailUsername": {
       "value": "${EMAIL_USERNAME}"
     },

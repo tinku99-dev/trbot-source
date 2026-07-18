@@ -13,8 +13,6 @@ namespace TradingResearchBot.Services;
 public sealed class ResearchService
 {
     private const int LookbackDays = 260; // enough for a 200-SMA
-    private const int OptionsMinDte = 7;
-    private const int OptionsMaxDte = 45;
 
     private readonly IMarketDataProvider _market;
     private readonly IUniverseProvider _universe;
@@ -27,6 +25,7 @@ public sealed class ResearchService
     private readonly MarketHoursGuard _clock;
     private readonly IOptionsDataProvider _options;
     private readonly IOptionsStrategist _optionsStrategist;
+    private readonly IAiOptionsAdvisor _aiOptionsAdvisor;
     private readonly InstitutionalOverlayService _institutional;
     private readonly AlpacaPaperTradingService _paperTrading;
     private readonly BotOptions _optionsConfig;
@@ -44,6 +43,7 @@ public sealed class ResearchService
         MarketHoursGuard clock,
         IOptionsDataProvider options,
         IOptionsStrategist optionsStrategist,
+        IAiOptionsAdvisor aiOptionsAdvisor,
         InstitutionalOverlayService institutional,
         AlpacaPaperTradingService paperTrading,
         IOptions<BotOptions> botOptions,
@@ -60,6 +60,7 @@ public sealed class ResearchService
         _clock = clock;
         _options = options;
         _optionsStrategist = optionsStrategist;
+        _aiOptionsAdvisor = aiOptionsAdvisor;
         _institutional = institutional;
         _paperTrading = paperTrading;
         _optionsConfig = botOptions.Value;
@@ -190,6 +191,8 @@ public sealed class ResearchService
 
         var fresh = report.Candidates
             .Where(c => !state.AlertedSymbols.Contains(c.Symbol))
+            .Where(PassesIntradayAlertFilter)
+            .Take(Math.Max(1, _optionsConfig.Notifications.MaxIntradayAlerts))
             .ToList();
 
         if (fresh.Count == 0)
@@ -236,15 +239,31 @@ public sealed class ResearchService
             {
                 var chain = await _options.GetChainAsync(
                     candidate.Symbol, candidate.Indicators.Price,
-                    OptionsMinDte, OptionsMaxDte, ct);
+                    _optionsConfig.Options.MinDaysToExpiration,
+                    _optionsConfig.Options.MaxDaysToExpiration, ct);
                 if (chain is null) continue;
 
                 candidate.OptionIdea = _optionsStrategist.Suggest(candidate, chain);
+                if (_optionsConfig.AiOptions.Enabled && candidate.OptionIdea is not null)
+                    await _aiOptionsAdvisor.EnrichAsync(candidate, ct);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Options enrichment failed for {Symbol}.", candidate.Symbol);
             }
         }
+    }
+
+    private bool PassesIntradayAlertFilter(Candidate c)
+    {
+        var alerts = _optionsConfig.Notifications;
+        if (c.Score < alerts.MinIntradayScore) return false;
+
+        if (alerts.RequireOptionIdeaForStockAlerts &&
+            c.AssetClass == AssetClass.Stock &&
+            c.OptionIdea is null)
+            return false;
+
+        return true;
     }
 }
