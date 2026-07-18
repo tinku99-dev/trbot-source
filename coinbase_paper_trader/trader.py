@@ -123,6 +123,16 @@ STARTER_ENTRY_MIN_CONSENSUS = int(os.environ.get("STARTER_ENTRY_MIN_CONSENSUS", 
 STARTER_ENTRY_SIZE_PCT = float(os.environ.get("STARTER_ENTRY_SIZE_PCT", "30"))
 STARTER_ENTRY_MAX_DISTRIBUTION_SCORE = float(os.environ.get("STARTER_ENTRY_MAX_DISTRIBUTION_SCORE", "35"))
 STARTER_ENTRY_MAX_OVEREXTENSION_PCT = float(os.environ.get("STARTER_ENTRY_MAX_OVEREXTENSION_PCT", "1.0"))
+QUALITY_NEAR_MISS_STARTER_ENABLED = os.environ.get("QUALITY_NEAR_MISS_STARTER_ENABLED", "true").lower() == "true"
+QUALITY_NEAR_MISS_MAX_SCORE_GAP = float(os.environ.get("QUALITY_NEAR_MISS_MAX_SCORE_GAP", "3"))
+QUALITY_NEAR_MISS_SIZE_PCT = float(os.environ.get("QUALITY_NEAR_MISS_SIZE_PCT", "30"))
+QUALITY_NEAR_MISS_MIN_CONSENSUS = int(os.environ.get("QUALITY_NEAR_MISS_MIN_CONSENSUS", "2"))
+QUALITY_NEAR_MISS_MIN_DIRECTIONAL_SCORE = float(os.environ.get("QUALITY_NEAR_MISS_MIN_DIRECTIONAL_SCORE", "65"))
+QUALITY_NEAR_MISS_MIN_OBV_PRESSURE_PCT = float(os.environ.get("QUALITY_NEAR_MISS_MIN_OBV_PRESSURE_PCT", "40"))
+QUALITY_NEAR_MISS_MIN_24H_CHANGE_PCT = float(os.environ.get("QUALITY_NEAR_MISS_MIN_24H_CHANGE_PCT", "5"))
+QUALITY_NEAR_MISS_MAX_1H_CHANGE_PCT = float(os.environ.get("QUALITY_NEAR_MISS_MAX_1H_CHANGE_PCT", "3"))
+QUALITY_NEAR_MISS_MIN_24H_DOLLAR_VOLUME = float(os.environ.get("QUALITY_NEAR_MISS_MIN_24H_DOLLAR_VOLUME", "5000000"))
+QUALITY_NEAR_MISS_MAX_DISTRIBUTION_SCORE = float(os.environ.get("QUALITY_NEAR_MISS_MAX_DISTRIBUTION_SCORE", "35"))
 MIN_NEW_ORDER_USD = float(os.environ.get("MIN_NEW_ORDER_USD", "10"))
 
 # Bollinger mean-reversion entries. The bot only opens long positions, so lower
@@ -1994,6 +2004,69 @@ def derivatives_regime_gate(product_data: dict) -> dict:
     return {"ok": True, "reason": "funding regime OK", "available": True}
 
 
+def quality_near_miss_starter_result(product_data: dict, signal: dict) -> dict:
+    """
+    Allows a tiny starter for VVV-like moves: strong liquidity/OBV/markup, two
+    confirming strategies, and only a small miss below the full-size buy score.
+    """
+    if not QUALITY_NEAR_MISS_STARTER_ENABLED or LIVE_ORDERS_ACTIVE:
+        return {"ok": False, "reason": "disabled"}
+    strategy = str(signal.get("strategy", "") or "")
+    if strategy not in {"24H_MOMENTUM_VOLUME", "CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT"}:
+        return {"ok": False, "reason": "strategy not eligible"}
+    score = float(signal.get("score", 0.0) or 0.0)
+    threshold = float(signal.get("effective_threshold", signal.get("threshold", MIN_SIGNAL_SCORE)) or MIN_SIGNAL_SCORE)
+    gap = threshold - score
+    if gap <= 0 or gap > QUALITY_NEAR_MISS_MAX_SCORE_GAP:
+        return {"ok": False, "reason": f"score gap {gap:.1f} outside near-miss band"}
+    if int(signal.get("consensus_count", 0) or 0) < QUALITY_NEAR_MISS_MIN_CONSENSUS:
+        return {"ok": False, "reason": "insufficient consensus"}
+
+    distribution = product_data.get("distribution_shadow", {}) or {}
+    distribution_score = float(distribution.get("score", 0.0) or 0.0)
+    if distribution.get("would_block") or distribution_score > QUALITY_NEAR_MISS_MAX_DISTRIBUTION_SCORE:
+        return {"ok": False, "reason": "distribution pressure too high"}
+
+    obv = product_data.get("obv", {}) or {}
+    obv_pressure = float(obv.get("obv_pressure_pct", 0.0) or 0.0)
+    up_ratio = float(obv.get("up_volume_ratio", 0.0) or 0.0)
+    dollar_volume = float(product_data.get("dollar_volume_24h", 0.0) or 0.0)
+    move_24h = float(product_data.get("price_change_24h", 0.0) or 0.0)
+    move_1h = float(product_data.get("price_change_1h", 0.0) or 0.0)
+    volume_score = 35.0 if dollar_volume >= 10_000_000 else 25.0 if dollar_volume >= QUALITY_NEAR_MISS_MIN_24H_DOLLAR_VOLUME else 0.0
+    move_score = min(30.0, max(0.0, move_24h) * 3.0) + min(10.0, max(0.0, move_1h) * 4.0)
+    flow_score = min(25.0, max(0.0, obv_pressure) * 0.5)
+    distribution_penalty = distribution_score * 0.25
+    directional_score = round(volume_score + move_score + flow_score - distribution_penalty, 2)
+    checks = [
+        (directional_score >= QUALITY_NEAR_MISS_MIN_DIRECTIONAL_SCORE, f"directional {directional_score:.1f}"),
+        (obv_pressure >= QUALITY_NEAR_MISS_MIN_OBV_PRESSURE_PCT, f"OBV {obv_pressure:+.1f}%"),
+        (up_ratio >= MIN_OBV_UP_VOLUME_RATIO, f"up-volume {up_ratio:.2f}"),
+        (dollar_volume >= QUALITY_NEAR_MISS_MIN_24H_DOLLAR_VOLUME, f"24h volume ${dollar_volume:,.0f}"),
+        (move_24h >= QUALITY_NEAR_MISS_MIN_24H_CHANGE_PCT, f"24h move {move_24h:+.2f}%"),
+        (move_1h <= QUALITY_NEAR_MISS_MAX_1H_CHANGE_PCT, f"1h move {move_1h:+.2f}%"),
+    ]
+    failed = [label for passed, label in checks if not passed]
+    if failed:
+        return {"ok": False, "reason": "; ".join(failed)}
+    return {
+        "ok": True,
+        "reason": (
+            f"near-miss starter: score {score:.0f}/{threshold:.0f}, "
+            f"directional {directional_score:.1f}, OBV {obv_pressure:+.1f}%"
+        ),
+        "score_gap": round(gap, 1),
+        "size_pct": max(5.0, min(50.0, QUALITY_NEAR_MISS_SIZE_PCT)),
+        "directional_score": directional_score,
+        "obv_pressure_pct": obv_pressure,
+        "up_volume_ratio": up_ratio,
+        "dollar_volume_24h": dollar_volume,
+        "price_change_24h": move_24h,
+        "price_change_1h": move_1h,
+        "distribution_score": distribution_score,
+    }
+
+
 def select_entry_signal(product_data: dict) -> dict:
     """
     Returns the strongest currently buyable signal for a product, with a
@@ -2136,6 +2209,16 @@ def select_entry_signal(product_data: dict) -> dict:
     best["consensus_bonus"]      = bonus
     best["confidence_level"]     = confidence_level
     best["confirming_strategies"] = [c["strategy"] for c in confirming]
+    if not best["eligible"]:
+        starter = quality_near_miss_starter_result(product_data, best)
+        if starter.get("ok"):
+            features = dict(best.get("features", {}) or {})
+            features["quality_near_miss_starter"] = starter
+            best["features"] = features
+            best["eligible"] = True
+            best["starter_only"] = True
+            best["starter_reason"] = starter["reason"]
+            best["effective_threshold"] = adjusted_score
     return best
 
 
@@ -3429,6 +3512,8 @@ def _open_position_from_entry(
         "entry_strategy_score":   signal["score"],
         "entry_strategy_raw_score": signal.get("raw_score", signal["score"]),
         "entry_strategy_features": signal["features"],
+        "entry_starter_only":     bool(signal.get("starter_only", False)),
+        "entry_starter_reason":   signal.get("starter_reason", ""),
         "entry_confidence_level": signal.get("confidence_level", "SINGLE"),
         "entry_consensus_count":  signal.get("consensus_count", 1),
         "entry_confirming_strategies": signal.get("confirming_strategies", [signal["strategy"]]),
@@ -3618,9 +3703,11 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
             "consensus_bonus": round(float(signal.get("consensus_bonus", 0.0)), 1),
             "confirming_strategies": signal.get("confirming_strategies", [signal["strategy"]]),
             "eligible": eligible,
-            "status": "READY" if eligible else "WATCH",
+            "starter_only": bool(signal.get("starter_only", False)),
+            "starter_reason": str(signal.get("starter_reason", "")),
+            "status": "STARTER" if eligible and signal.get("starter_only") else "READY" if eligible else "WATCH",
             "liquidity_ok": liquidity_ok,
-            "reason": "meets all entry gates" if eligible else "; ".join(reasons),
+            "reason": signal.get("starter_reason", "meets all entry gates") if eligible else "; ".join(reasons),
             "base_score": round(float(prod.get("score", 0.0) or 0.0), 1),
             "pattern_score": round(float(prod.get("pre_breakout_score", 0.0) or 0.0), 1),
             "orb_score": round(float(prod.get("orb_score", 0.0) or 0.0), 1),
@@ -4092,6 +4179,10 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 momentum_cap = CAPITAL_PER_TRADE_USD * max(10.0, min(100.0, MOMENTUM_RUNNER_MAX_POSITION_PCT)) / 100.0
                 position_size = min(position_size, round(momentum_cap, 2))
                 sizing_reasons.append(f"runner cap {MOMENTUM_RUNNER_MAX_POSITION_PCT:.0f}%")
+            if signal.get("starter_only"):
+                starter_pct = max(5.0, min(50.0, float((signal.get("features", {}) or {}).get("quality_near_miss_starter", {}).get("size_pct", QUALITY_NEAR_MISS_SIZE_PCT) or QUALITY_NEAR_MISS_SIZE_PCT)))
+                position_size = round(position_size * starter_pct / 100.0, 2)
+                sizing_reasons.append(f"quality near-miss starter {starter_pct:.0f}%")
             position_size, fragile_reasons = _risk_adjusted_position_size(prod, signal, position_size)
             sizing_reasons.extend(fragile_reasons)
             liquidation_limit = 0.0
@@ -4265,6 +4356,11 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 pos["starter_entry_score"] = float(signal.get("score", 0.0) or 0.0)
                 pos["starter_entry_atr_pct"] = calculate_atr_pct(product_id)
                 pos["starter_entry_execution"] = order_book
+            if signal.get("starter_only"):
+                pos = active_positions[product_id]
+                pos["quality_near_miss_starter"] = True
+                pos["quality_near_miss_reason"] = signal.get("starter_reason", "")
+                pos["quality_near_miss_full_threshold"] = float(signal.get("threshold", MIN_SIGNAL_SCORE) or MIN_SIGNAL_SCORE)
 
             confirming_strategies = signal.get("confirming_strategies", [signal["strategy"]])
             confidence_label = signal.get("confidence_level", "SINGLE")
@@ -4437,6 +4533,8 @@ def _entry_review_snapshot(pos: dict) -> dict:
     return {
         "entry_strategy": pos.get("entry_strategy", "unknown"),
         "entry_strategy_score": float(pos.get("entry_strategy_score", pos.get("signal_score", 0.0)) or 0.0),
+        "entry_starter_only": bool(pos.get("entry_starter_only", False)),
+        "entry_starter_reason": pos.get("entry_starter_reason", ""),
         "entry_confidence_level": pos.get("entry_confidence_level", "SINGLE"),
         "entry_consensus_count": int(pos.get("entry_consensus_count", 0) or 0),
         "entry_confirming_strategies": pos.get("entry_confirming_strategies", []),

@@ -129,6 +129,38 @@ class TradingV2SpecTests(unittest.TestCase):
         reason = trader._stagnant_position_reason(pos, 99.9, candles)
         self.assertTrue(reason.startswith("STAGNANT_CAPITAL_"))
 
+    def test_quality_near_miss_vvv_like_setup_becomes_starter_only(self):
+        old_min_signal = trader.MIN_SIGNAL_SCORE
+        trader.MIN_SIGNAL_SCORE = 70.0
+        product = {
+            "product_id": "VVV-USD",
+            "price": 11.42,
+            "score": 60.0,
+            "pre_breakout_score": 57.0,
+            "orb_score": 29.0,
+            "bollinger_score": 0.0,
+            "wedge_score": 0.0,
+            "momentum_runner_score": 0.0,
+            "price_change_24h": 6.88,
+            "price_change_1h": 1.13,
+            "dollar_volume_24h": 7_670_158.83,
+            "obv": {"obv_pressure_pct": 50.23, "up_volume_ratio": 0.62},
+            "distribution_shadow": {
+                "score": 15.0,
+                "phase": "MARKUP",
+                "would_block": False,
+                "reasons": [],
+            },
+        }
+        try:
+            signal = trader.select_entry_signal(product)
+            self.assertTrue(signal["eligible"])
+            self.assertTrue(signal["starter_only"])
+            self.assertEqual(signal["score"], 68.0)
+            self.assertIn("quality_near_miss_starter", signal["features"])
+        finally:
+            trader.MIN_SIGNAL_SCORE = old_min_signal
+
 
 if __name__ == "__main__":
     unittest.main()
