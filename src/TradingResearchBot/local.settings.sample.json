@@ -39,7 +39,7 @@
     "Bot__Sma200__TargetPct": "10.0",
     "Bot__Sma200__StopPct": "3.0",
 
-    "//Options": "Options research enrichment (Provider = Mock | Tradier | LicensedHttp)",
+    "//Options": "Options research enrichment (Provider = Mock | Tradier | Polygon | LicensedHttp)",
     "Bot__Options__Enabled": "true",
     "Bot__Options__Provider": "Mock",
     "Bot__Options__MinDaysToExpiration": "10",

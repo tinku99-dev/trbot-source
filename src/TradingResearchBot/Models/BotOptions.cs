@@ -324,7 +324,7 @@ public sealed class PaperTradingOptions
 public sealed class OptionsResearchOptions
 {
     public bool Enabled { get; set; } = true;
-    /// <summary>Provider key: Mock | Tradier | LicensedHttp.</summary>
+    /// <summary>Provider key: Mock | Tradier | Polygon | LicensedHttp.</summary>
     public string Provider { get; set; } = "Mock";
 
     /// <summary>Expiration window used for options research ideas.</summary>

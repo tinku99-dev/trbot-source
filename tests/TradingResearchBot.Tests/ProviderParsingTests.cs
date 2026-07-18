@@ -46,6 +46,57 @@ public class ProviderParsingTests
     }
 
     [Fact]
+    public void PolygonOptions_ParseSnapshotChain_MapsContracts()
+    {
+        const string json = """
+        {
+          "results": [
+            {
+              "details": {
+                "contract_type": "call",
+                "expiration_date": "2026-08-21",
+                "strike_price": 150.0
+              },
+              "day": { "volume": 1234 },
+              "last_quote": { "bid": 2.10, "ask": 2.24 },
+              "last_trade": { "price": 2.18 },
+              "open_interest": 9876,
+              "implied_volatility": 0.41,
+              "greeks": { "delta": 0.43 }
+            },
+            {
+              "details": {
+                "contract_type": "put",
+                "expiration_date": "2026-08-21",
+                "strike_price": 145.0
+              },
+              "day": { "volume": 500 },
+              "last_quote": { "bid": 1.30, "ask": 1.44 },
+              "open_interest": 3210,
+              "implied_volatility": 0.39,
+              "greeks": { "delta": -0.36 }
+            }
+          ]
+        }
+        """;
+
+        var contracts = PolygonOptionsDataProvider.ParseSnapshotChain(json, "AAPL");
+
+        Assert.Equal(2, contracts.Count);
+        var call = contracts.First(c => c.Type == OptionType.Call);
+        Assert.Equal("AAPL", call.UnderlyingSymbol);
+        Assert.Equal(150m, call.Strike);
+        Assert.Equal(new DateOnly(2026, 8, 21), call.Expiration);
+        Assert.Equal(2.10m, call.Bid);
+        Assert.Equal(2.24m, call.Ask);
+        Assert.Equal(2.18m, call.Last);
+        Assert.Equal(9876, call.OpenInterest);
+        Assert.Equal(1234, call.Volume);
+        Assert.Equal(0.41m, call.ImpliedVolatility);
+        Assert.Equal(0.43m, call.Delta);
+    }
+
+    [Fact]
     public void Tradier_ParseExpirations_HandlesArray()
     {
         const string json = """

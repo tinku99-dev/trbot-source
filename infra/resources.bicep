@@ -17,7 +17,7 @@ param alpacaSecret string = ''
 
 param marketProvider string = 'Alpaca'
 
-param optionsProvider string = 'Tradier'
+param optionsProvider string = 'Polygon'
 
 @secure()
 param tradierApiKey string = ''

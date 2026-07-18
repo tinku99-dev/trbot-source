@@ -80,6 +80,8 @@ var host = new HostBuilder()
         var optionsProvider = configuration[$"{BotOptions.SectionName}:Options:Provider"] ?? "Mock";
         if (string.Equals(optionsProvider, "Tradier", StringComparison.OrdinalIgnoreCase))
             services.AddHttpClient<IOptionsDataProvider, TradierOptionsDataProvider>();
+        else if (string.Equals(optionsProvider, "Polygon", StringComparison.OrdinalIgnoreCase))
+            services.AddHttpClient<IOptionsDataProvider, PolygonOptionsDataProvider>();
         else if (string.Equals(optionsProvider, "LicensedHttp", StringComparison.OrdinalIgnoreCase))
             services.AddHttpClient<IOptionsDataProvider, LicensedHttpOptionsDataProvider>();
         else

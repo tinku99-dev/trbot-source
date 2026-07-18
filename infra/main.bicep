@@ -23,8 +23,8 @@ param alpacaSecret string = ''
 @description('Market data provider: Alpaca | Polygon | Mock.')
 param marketProvider string = 'Alpaca'
 
-@description('Options data provider: Tradier | Mock | LicensedHttp.')
-param optionsProvider string = 'Tradier'
+@description('Options data provider: Polygon | Tradier | Mock | LicensedHttp.')
+param optionsProvider string = 'Polygon'
 
 @description('Tradier API token for real options chains.')
 @secure()

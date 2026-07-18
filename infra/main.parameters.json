@@ -21,7 +21,7 @@
       "value": "${BOT_MARKET_PROVIDER=Alpaca}"
     },
     "optionsProvider": {
-      "value": "${BOT_OPTIONS_PROVIDER=Tradier}"
+      "value": "${BOT_OPTIONS_PROVIDER=Polygon}"
     },
     "tradierApiKey": {
       "value": "${TRADIER_API_KEY}"
