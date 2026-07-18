@@ -39,6 +39,11 @@ CAPITAL_PER_TRADE_USD   = float(os.environ.get("CAPITAL_PER_TRADE_USD",   "1000"
 MAX_OPEN_POSITIONS      = int(os.environ.get("MAX_OPEN_POSITIONS",          "3"))    # 3 simultaneous positions
 TOTAL_CAPITAL_USD       = float(os.environ.get(
     "TOTAL_CAPITAL_USD", str(CAPITAL_PER_TRADE_USD * MAX_OPEN_POSITIONS)))            # $3,000 budget
+LESS_TRADES_MODE_ENABLED = os.environ.get("LESS_TRADES_MODE_ENABLED", "true").lower() == "true"
+LESS_TRADES_MAX_OPEN_POSITIONS = int(os.environ.get("LESS_TRADES_MAX_OPEN_POSITIONS", "2"))
+FULL_SIZE_MIN_SCORE = float(os.environ.get("FULL_SIZE_MIN_SCORE", "90"))
+FULL_SIZE_MIN_CONSENSUS = int(os.environ.get("FULL_SIZE_MIN_CONSENSUS", "3"))
+MEDIUM_SCORE_STARTER_MAX_PCT = float(os.environ.get("MEDIUM_SCORE_STARTER_MAX_PCT", "40"))
 MAX_DAILY_LOSS_PER_COIN = float(os.environ.get("MAX_DAILY_LOSS_PER_COIN",  "100"))  # per-coin/day
 MAX_DAILY_LOSS_PCT      = float(os.environ.get("MAX_DAILY_LOSS_PCT",        "5.0"))  # 5% portfolio stop
 
@@ -315,6 +320,8 @@ HIGH_CONSENSUS_TAKE_PROFIT_PERCENT = float(os.environ.get("HIGH_CONSENSUS_TAKE_P
 HIGH_CONSENSUS_TP_MIN_COUNT = int(os.environ.get("HIGH_CONSENSUS_TP_MIN_COUNT", "3"))
 HIGH_CONSENSUS_TP_MIN_SCORE = float(os.environ.get("HIGH_CONSENSUS_TP_MIN_SCORE", "90.0"))
 TRAILING_PERCENT      = float(os.environ.get("TRAILING_PERCENT",     "5.0"))  # 5% trailing floor
+MIN_BREATHING_STOP_PCT = float(os.environ.get("MIN_BREATHING_STOP_PCT", "6.5"))
+MIN_BREATHING_TRAIL_PCT = float(os.environ.get("MIN_BREATHING_TRAIL_PCT", "6.5"))
 MOON_BAG_PERCENT      = max(0.0, min(100.0, float(os.environ.get("MOON_BAG_PERCENT", "30.0"))))
 TAKE_PROFIT_SELL_PERCENT = 100.0 - MOON_BAG_PERCENT
 QUICK_TAKE_PROFIT_ENABLED = os.environ.get("QUICK_TAKE_PROFIT_ENABLED", "true").lower() == "true"
@@ -386,7 +393,10 @@ EARLY_FAILURE_EXIT_ENABLED = os.environ.get("EARLY_FAILURE_EXIT_ENABLED", "true"
 EARLY_FAILURE_MIN_HOLD_MINUTES = int(os.environ.get("EARLY_FAILURE_MIN_HOLD_MINUTES", "45"))
 EARLY_FAILURE_MAX_HOLD_MINUTES = int(os.environ.get("EARLY_FAILURE_MAX_HOLD_MINUTES", "120"))
 EARLY_FAILURE_MAX_PROFIT_PCT = float(os.environ.get("EARLY_FAILURE_MAX_PROFIT_PCT", "1.0"))
-EARLY_FAILURE_MIN_LOSS_PCT = float(os.environ.get("EARLY_FAILURE_MIN_LOSS_PCT", "-0.35"))
+EARLY_FAILURE_MIN_LOSS_PCT = min(
+    float(os.environ.get("EARLY_FAILURE_MIN_LOSS_PCT", "-0.35")),
+    float(os.environ.get("EARLY_FAILURE_MIN_LOSS_FLOOR_PCT", "-0.75")),
+)
 FAILED_ENTRY_COOLDOWN_HOURS = float(os.environ.get("FAILED_ENTRY_COOLDOWN_HOURS", "8"))
 STAGNANT_EXIT_ENABLED = os.environ.get("STAGNANT_EXIT_ENABLED", "true").lower() == "true"
 STAGNANT_EXIT_MIN_HOLD_MINUTES = int(os.environ.get("STAGNANT_EXIT_MIN_HOLD_MINUTES", os.environ.get("STAGNANCY_EXIT_MINUTES", "60")))
@@ -3009,7 +3019,7 @@ def _position_size_for_score(score: float) -> float:
 
     Linearly interpolates between DYNAMIC_SIZE_MIN_PCT% (at MIN_SIGNAL_SCORE)
     and DYNAMIC_SIZE_MAX_PCT% (at score 100) of CAPITAL_PER_TRADE_USD.
-    Always clamped to [50%, 200%] of CAPITAL_PER_TRADE_USD.
+    Always clamped to [20%, 200%] of CAPITAL_PER_TRADE_USD.
     Falls back to a fixed CAPITAL_PER_TRADE_USD when dynamic sizing is off.
     """
     if not DYNAMIC_SIZING_ENABLED:
@@ -3018,8 +3028,23 @@ def _position_size_for_score(score: float) -> float:
     score_range = 100.0 - float(MIN_SIGNAL_SCORE)
     pct = DYNAMIC_SIZE_MIN_PCT + (DYNAMIC_SIZE_MAX_PCT - DYNAMIC_SIZE_MIN_PCT) * \
           ((score - float(MIN_SIGNAL_SCORE)) / score_range if score_range > 0 else 1.0)
-    pct = max(50.0, min(200.0, pct))  # hard clamp regardless of env vars
+    pct = max(20.0, min(200.0, pct))  # hard clamp regardless of env vars
     return round(CAPITAL_PER_TRADE_USD * pct / 100.0, 2)
+
+
+def _less_trades_position_size(signal: dict, base_size: float) -> tuple[float, list[str]]:
+    """Keeps the bot concentrated: only A+ signals get full-size capital."""
+    if not LESS_TRADES_MODE_ENABLED:
+        return base_size, []
+    score = float(signal.get("score", 0.0) or 0.0)
+    consensus = int(signal.get("consensus_count", 0) or 0)
+    if signal.get("starter_only") or (score >= FULL_SIZE_MIN_SCORE and consensus >= FULL_SIZE_MIN_CONSENSUS):
+        return base_size, []
+    cap_pct = max(10.0, min(100.0, MEDIUM_SCORE_STARTER_MAX_PCT))
+    capped = round(min(base_size, CAPITAL_PER_TRADE_USD * cap_pct / 100.0), 2)
+    if capped < base_size:
+        return capped, [f"less-trades cap {cap_pct:.0f}% until score >= {FULL_SIZE_MIN_SCORE:.0f}/{FULL_SIZE_MIN_CONSENSUS}x"]
+    return base_size, []
 
 
 def _risk_adjusted_position_size(product_data: dict, signal: dict, base_size: float) -> tuple[float, list[str]]:
@@ -3153,11 +3178,17 @@ def _pending_capital_reserved(pending_entries: dict) -> float:
                for p in pending_entries.values())
 
 
+def _effective_max_open_positions() -> int:
+    if not LESS_TRADES_MODE_ENABLED:
+        return MAX_OPEN_POSITIONS
+    return min(MAX_OPEN_POSITIONS, max(1, LESS_TRADES_MAX_OPEN_POSITIONS))
+
+
 def _budget_is_full(active_positions: dict, pending_entries: dict | None = None,
                     next_size: float | None = None) -> bool:
     """Returns True when opening another position would exceed limits."""
     pending_entries = pending_entries or {}
-    if (len(active_positions) + len(pending_entries)) >= MAX_OPEN_POSITIONS:
+    if (len(active_positions) + len(pending_entries)) >= _effective_max_open_positions():
         return True
     size = next_size if next_size is not None else CAPITAL_PER_TRADE_USD
     reserved = _capital_deployed(active_positions) + _pending_capital_reserved(pending_entries)
@@ -3476,6 +3507,11 @@ def _open_position_from_entry(
     else:
         initial_stop = fill_price * (1 - TRAILING_PERCENT / 100)
         stop_method = f"flat {TRAILING_PERCENT:.1f}%"
+    breathing_stop_pct = max(TRAILING_PERCENT, MIN_BREATHING_STOP_PCT)
+    breathing_stop = fill_price * (1 - breathing_stop_pct / 100)
+    if 0 < breathing_stop < initial_stop:
+        initial_stop = breathing_stop
+        stop_method = f"{stop_method}; breathing floor {breathing_stop_pct:.1f}%"
     main_tp_pct, main_tp_reason = _take_profit_percent_for_signal(signal)
     take_profit_target = fill_price * (1 + main_tp_pct / 100)
     size_pct = round(position_size / CAPITAL_PER_TRADE_USD * 100) if CAPITAL_PER_TRADE_USD else 0
@@ -3569,7 +3605,7 @@ def send_shadow_signal_summary(candidates: list[dict], reason: str) -> None:
     lines = [
         f"⚠️ MISSED TRADES — {len(candidates)} coin(s) cleared ALL entry gates but were NOT bought",
         f"   Reason: {reason}",
-        f"   Limit: {MAX_OPEN_POSITIONS} positions max | ${CAPITAL_PER_TRADE_USD:,.0f}/coin | ${TOTAL_CAPITAL_USD:,.0f} total budget",
+        f"   Limit: {_effective_max_open_positions()} positions max | ${CAPITAL_PER_TRADE_USD:,.0f}/coin | ${TOTAL_CAPITAL_USD:,.0f} total budget",
         f"   Gates: score ≥ {MIN_SIGNAL_SCORE:.0f}/100 | liquidity ✓ | OBV ✓ | market regime ✓",
         "",
     ]
@@ -3762,6 +3798,10 @@ def build_scan_snapshot(products: list[dict], active_positions: dict, top_n: int
         "positions_count": len(positions),
         "config": {
             "capital_per_trade_usd": CAPITAL_PER_TRADE_USD,
+            "max_open_positions": _effective_max_open_positions(),
+            "less_trades_mode_enabled": LESS_TRADES_MODE_ENABLED,
+            "full_size_min_score": FULL_SIZE_MIN_SCORE,
+            "full_size_min_consensus": FULL_SIZE_MIN_CONSENSUS,
             "take_profit_pct": TAKE_PROFIT_PERCENT,
             "normal_take_profit_pct": NORMAL_TAKE_PROFIT_PERCENT,
             "runner_take_profit_pct": RUNNER_TAKE_PROFIT_PERCENT,
@@ -4183,6 +4223,8 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 starter_pct = max(5.0, min(50.0, float((signal.get("features", {}) or {}).get("quality_near_miss_starter", {}).get("size_pct", QUALITY_NEAR_MISS_SIZE_PCT) or QUALITY_NEAR_MISS_SIZE_PCT)))
                 position_size = round(position_size * starter_pct / 100.0, 2)
                 sizing_reasons.append(f"quality near-miss starter {starter_pct:.0f}%")
+            position_size, less_trade_reasons = _less_trades_position_size(signal, position_size)
+            sizing_reasons.extend(less_trade_reasons)
             position_size, fragile_reasons = _risk_adjusted_position_size(prod, signal, position_size)
             sizing_reasons.extend(fragile_reasons)
             liquidation_limit = 0.0
@@ -4238,7 +4280,7 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
 
             if _budget_is_full(active_positions, pending_entries, next_size=position_size):
                 budget_skip_reason = (
-                    f"budget is full ({len(active_positions) + len(pending_entries)}/{MAX_OPEN_POSITIONS} slots, "
+                    f"budget is full ({len(active_positions) + len(pending_entries)}/{_effective_max_open_positions()} slots, "
                     f"${_capital_deployed(active_positions) + _pending_capital_reserved(pending_entries):,.0f}/${TOTAL_CAPITAL_USD:,.0f} reserved)"
                 )
                 if len(shadow_candidates) < SHADOW_ALERT_MAX_PER_CYCLE and should_include_shadow_alert(product_id, signal["strategy"]):
@@ -4380,7 +4422,7 @@ def scan_and_execute_entries(client, active_positions: dict, pending_entries: di
                 f"   Pattern {prod.get('pre_breakout_score', 0):.0f}  |  ORB {prod.get('orb_score', 0):.0f}  |  BB {prod.get('bollinger_score', 0):.0f}  |  Wedge {prod.get('wedge_score', 0):.0f}  |  Runner {prod.get('momentum_runner_score', 0):.0f}  (all /100)\n"
                 f"📈 Quick TP: +{QUICK_TAKE_PROFIT_PERCENT:.1f}%/{QUICK_TAKE_PROFIT_SELL_PERCENT:.0f}%  |  Main TP: ${entry_meta['take_profit_target']:,.6g} (+{entry_meta['main_tp_pct']:.0f}% {entry_meta['main_tp_reason']})  |  Stop: ${entry_meta['initial_stop']:,.6g} [{entry_meta['stop_method']}]\n"
                 f"💧 24h Vol: ${liquidity.get('dollar_volume_24h', 0.0):,.0f}  |  OBV: {obv.get('metrics', {}).get('obv_pressure_pct', 0.0):+.1f}%\n"
-                f"🏦 Budget used: ${_capital_deployed(active_positions) + _pending_capital_reserved(pending_entries):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions) + len(pending_entries)}/{MAX_OPEN_POSITIONS} slots)"
+                f"🏦 Budget used: ${_capital_deployed(active_positions) + _pending_capital_reserved(pending_entries):,.0f} / ${TOTAL_CAPITAL_USD:,.0f}  ({len(active_positions) + len(pending_entries)}/{_effective_max_open_positions()} slots)"
                 f"{sizing_note}"
             )
             print(f"  {msg}")
@@ -4439,7 +4481,7 @@ def compute_trailing_stop_pct(product_id: str, entry_price: float, current_price
         atr_pct = atr_cache[product_id]
         if atr_pct and atr_pct > 0:
             trail_pct = max(tier_floor, ATR_TRAIL_MULTIPLIER * atr_pct)
-    trail_pct = min(TRAIL_MAX_PCT, max(TRAILING_PERCENT, trail_pct))
+    trail_pct = min(TRAIL_MAX_PCT, max(TRAILING_PERCENT, MIN_BREATHING_TRAIL_PCT, trail_pct))
     return round(trail_pct, 3), round(profit_pct, 3)
 
 
@@ -5150,7 +5192,7 @@ def build_portfolio_summary(active_positions: dict, history: list, live_prices: 
         f"📊 **Paper Trading Summary** (last {hours:.0f}h) — {_utcnow_iso()[:19]}Z",
         f"**Total P/L:** ${total_pnl:+,.2f}  (realized ${realized_total:+,.2f} + open ${unrealized_total:+,.2f})",
         f"**Closed trades:** {len(closed)}  ({wins} wins / {losses} losses)",
-        f"**Open positions:** {len(active_positions)}/{MAX_OPEN_POSITIONS}  "
+        f"**Open positions:** {len(active_positions)}/{_effective_max_open_positions()}  "
         f"(${_capital_deployed(active_positions):,.0f} deployed)",
     ]
     if open_lines:

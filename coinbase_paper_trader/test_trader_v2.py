@@ -161,6 +161,38 @@ class TradingV2SpecTests(unittest.TestCase):
         finally:
             trader.MIN_SIGNAL_SCORE = old_min_signal
 
+    def test_less_trades_mode_caps_medium_quality_size_and_slots(self):
+        signal = {"score": 78.0, "consensus_count": 2}
+        size, reasons = trader._less_trades_position_size(signal, 1000.0)
+        self.assertEqual(size, 400.0)
+        self.assertTrue(any("less-trades cap" in reason for reason in reasons))
+
+        strong = {"score": 95.0, "consensus_count": 3}
+        size, reasons = trader._less_trades_position_size(strong, 1000.0)
+        self.assertEqual(size, 1000.0)
+        self.assertEqual(reasons, [])
+
+        active = {"A": {"allocated_usd": 100.0}, "B": {"allocated_usd": 100.0}}
+        self.assertTrue(trader._budget_is_full(active, {}, next_size=100.0))
+
+    def test_initial_stop_and_trail_have_breathing_floor(self):
+        product = {"product_id": "TEST-USD", "price": 100.0}
+        signal = {
+            "strategy": "24H_MOMENTUM_VOLUME",
+            "score": 90.0,
+            "features": {},
+            "confidence_level": "HIGH",
+            "consensus_count": 3,
+            "confirming_strategies": ["24H_MOMENTUM_VOLUME", "CANDLE_BREAKOUT", "OPENING_RANGE_BREAKOUT"],
+        }
+        structure = {"ok": True, "stop_loss": 98.0, "support_level": 99.0, "support_floor": 98.0}
+        positions = {}
+        trader._open_position_from_entry(positions, product, signal, structure, 100.0, 100.0, {}, [])
+        self.assertLessEqual(positions["TEST-USD"]["current_trailing_stop"], 93.5)
+
+        trail_pct, _ = trader.compute_trailing_stop_pct("TEST-USD", 100.0, 100.0, {"TEST-USD": 0.1})
+        self.assertGreaterEqual(trail_pct, trader.MIN_BREATHING_TRAIL_PCT)
+
 
 if __name__ == "__main__":
     unittest.main()
